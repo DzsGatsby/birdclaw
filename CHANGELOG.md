@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.11.15
+
+- Review every Home tweet in resumable, strictly validated batches before completing a Today report; visibly append any important item omitted from the main synthesis and report reviewed versus cited coverage.
+- Preserve real source counts, coverage progress, and both provider failures on unsuccessful daily reports; add authenticated exact-date retry and cool down unavailable providers to stop retry storms.
+
 ## 0.11.14
 
 - Submit verified Following snapshots directly from the cloud worker with the existing pairing token and endpoint checks; reject redirects and emit only safe transfer diagnostics.
