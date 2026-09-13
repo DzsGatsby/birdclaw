@@ -347,6 +347,7 @@ export function streamSummaryAnalysisEffect<T>({
 	runtime = defaultRuntimeServices,
 	parse,
 	fallback,
+	validateResult,
 	onDelta,
 	onFailover,
 	provider,
@@ -360,6 +361,7 @@ export function streamSummaryAnalysisEffect<T>({
 	runtime?: RuntimeServices;
 	parse: (value: unknown) => T;
 	fallback: (markdown: string) => T;
+	validateResult?: (result: HybridAnalysisResult<T>) => void;
 	onDelta?: (delta: string) => void;
 	onFailover?: (target: {
 		provider: SummaryModelProvider;
@@ -373,6 +375,21 @@ export function streamSummaryAnalysisEffect<T>({
 	return Effect.gen(function* () {
 		const targets = resolveTargets(options, runtime, provider, allowFailover);
 		let lastError: Error | undefined;
+		const providerErrors: Array<{
+			provider: SummaryModelProvider;
+			error: Error;
+		}> = [];
+		const combinedError = () =>
+			providerErrors.length > 1
+				? new Error(
+						`Summary providers failed — ${providerErrors
+							.map(
+								(item) =>
+									`${item.provider}: ${redactProviderError(item.error.message)}`,
+							)
+							.join("; ")}`,
+					)
+				: lastError;
 		for (const [index, target] of targets.entries()) {
 			if (index > 0) onFailover?.(target);
 			let emitted = false;
@@ -392,19 +409,27 @@ export function streamSummaryAnalysisEffect<T>({
 					signal,
 					runtime,
 				);
-				return target.provider === "deepseek"
-					? yield* readDeepSeekStreamEffect(response, {
-							parse,
-							fallback,
-							onDelta: emit,
-							delimiterPattern,
-						})
-					: yield* readHybridAnalysisStreamEffect(response, {
-							parse,
-							fallback,
-							onDelta: emit,
-							delimiterPattern,
-						});
+				const result =
+					target.provider === "deepseek"
+						? yield* readDeepSeekStreamEffect(response, {
+								parse,
+								fallback,
+								onDelta: emit,
+								delimiterPattern,
+							})
+						: yield* readHybridAnalysisStreamEffect(response, {
+								parse,
+								fallback,
+								onDelta: emit,
+								delimiterPattern,
+							});
+				if (validateResult) {
+					yield* Effect.try({
+						try: () => validateResult(result),
+						catch: toError,
+					});
+				}
+				return result;
 			});
 			const outcome = yield* Effect.either(attempt);
 			if (outcome._tag === "Right") {
@@ -418,12 +443,15 @@ export function streamSummaryAnalysisEffect<T>({
 				};
 			}
 			lastError = toError(outcome.left);
+			providerErrors.push({ provider: target.provider, error: lastError });
 			if (emitted || index === targets.length - 1) {
-				return yield* Effect.fail(lastError);
+				return yield* Effect.fail(combinedError() ?? lastError);
 			}
 		}
 		return yield* Effect.fail(
-			lastError ?? new Error("No summary model is available"),
+			combinedError() ??
+				lastError ??
+				new Error("No summary model is available"),
 		);
 	});
 }

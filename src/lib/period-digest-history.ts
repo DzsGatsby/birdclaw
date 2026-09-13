@@ -5,8 +5,10 @@ import { getBirdclawPaths } from "./config";
 import { getNativeDb, getReadDb } from "./db";
 import {
 	streamPeriodDigest,
+	type PeriodDigestContext,
 	type PeriodDigestRunResult,
 } from "./period-digest";
+import type { PeriodDigestCoverage } from "./period-digest-coverage";
 import { redactProviderError } from "./openai-response-runtime";
 import type { Database } from "./sqlite";
 
@@ -32,6 +34,17 @@ export interface PeriodDigestHistoryMetadata {
 	updatedAt: string;
 	finishedAt?: string;
 	pdfAvailable: boolean;
+	coverage?: Pick<
+		PeriodDigestCoverage,
+		| "version"
+		| "expected"
+		| "processed"
+		| "complete"
+		| "sourceTruncated"
+		| "missingTweetIds"
+		| "cited"
+		| "dispositions"
+	>;
 }
 
 export interface PeriodDigestHistoryDetail {
@@ -57,6 +70,7 @@ interface PeriodDigestHistoryRow extends Record<string, unknown> {
 	service_tier: string;
 	context_hash: string;
 	counts_json: string;
+	coverage_json: string;
 	digest_json: string;
 	markdown: string;
 	tweets_json: string;
@@ -134,6 +148,10 @@ function metadataFromRow(
 		row.digest_json,
 		null,
 	);
+	const coverage = parseJson<PeriodDigestCoverage | null>(
+		row.coverage_json ?? "{}",
+		null,
+	);
 	return {
 		id: row.id,
 		kind: intraday ? "intraday" : "daily",
@@ -151,7 +169,7 @@ function metadataFromRow(
 		summary:
 			digest?.summary ??
 			(row.status === "failed"
-				? "Generation will retry automatically."
+				? row.error || "Generation failed."
 				: "Generation in progress…"),
 		counts: {
 			...EMPTY_COUNTS,
@@ -171,6 +189,20 @@ function metadataFromRow(
 					? intradayDigestPdfPath(row.digest_date)
 					: dailyDigestPdfPath(row.digest_date),
 			),
+		...(coverage?.version === 1
+			? {
+					coverage: {
+						version: coverage.version,
+						expected: coverage.expected,
+						processed: coverage.processed,
+						complete: coverage.complete,
+						sourceTruncated: coverage.sourceTruncated,
+						missingTweetIds: coverage.missingTweetIds,
+						cited: coverage.cited,
+						dispositions: coverage.dispositions,
+					},
+				}
+			: {}),
 	};
 }
 
@@ -184,6 +216,10 @@ function detailFromRow(
 	);
 	if (!digest) return null;
 	const metadata = metadataFromRow(row);
+	const coverage = parseJson<PeriodDigestCoverage | null>(
+		row.coverage_json ?? "{}",
+		null,
+	);
 	return {
 		metadata,
 		result: {
@@ -205,6 +241,9 @@ function detailFromRow(
 				links: parseJson(row.links_json, []),
 				feedItems: parseJson(row.feed_json, []),
 				hash: row.context_hash,
+				...(metadata.coverage
+					? { sourceTruncated: metadata.coverage.sourceTruncated }
+					: {}),
 			},
 			digest,
 			markdown: row.markdown,
@@ -214,6 +253,7 @@ function detailFromRow(
 			serviceTier: row.service_tier,
 			cached: true,
 			updatedAt: row.finished_at ?? row.updated_at,
+			...(coverage?.version === 1 ? { coverage } : {}),
 		},
 	};
 }
@@ -445,6 +485,54 @@ export function claimIntradayDigestSlot(slotKey: string, db = getNativeDb()) {
 	);
 }
 
+export function initializePeriodDigestHistoryContext(
+	id: string,
+	claimToken: string,
+	context: PeriodDigestContext,
+	db = getNativeDb(),
+) {
+	const now = new Date().toISOString();
+	return (
+		db
+			.prepare(
+				`update period_digest_history set
+				 include_dms = ?, include_feed = ?, twitter_scope = ?, counts_json = ?,
+				 coverage_json = case when context_hash = ? then coverage_json else '{}' end,
+				 context_hash = ?, updated_at = ?
+				 where id = ? and claim_token = ? and status = 'pending'`,
+			)
+			.run(
+				context.includeDms ? 1 : 0,
+				context.includeFeed ? 1 : 0,
+				context.twitterScope === "home" ? "home" : "all",
+				JSON.stringify(context.counts),
+				context.hash,
+				context.hash,
+				now,
+				id,
+				claimToken,
+			).changes > 0
+	);
+}
+
+export function updatePeriodDigestHistoryCoverage(
+	id: string,
+	claimToken: string,
+	coverage: PeriodDigestCoverage,
+	db = getNativeDb(),
+) {
+	const now = new Date().toISOString();
+	return (
+		db
+			.prepare(
+				`update period_digest_history
+				 set coverage_json = ?, updated_at = ?
+				 where id = ? and claim_token = ? and status = 'pending'`,
+			)
+			.run(JSON.stringify(coverage), now, id, claimToken).changes > 0
+	);
+}
+
 export function completePeriodDigestHistory(
 	id: string,
 	claimToken: string,
@@ -458,7 +546,7 @@ export function completePeriodDigestHistory(
 			`update period_digest_history set
 				 status = 'ready', include_dms = ?, include_feed = ?, twitter_scope = ?, provider = ?, model = ?,
 			 reasoning_effort = ?, service_tier = ?, context_hash = ?,
-			 counts_json = ?, digest_json = ?, markdown = ?, tweets_json = ?,
+				 counts_json = ?, coverage_json = ?, digest_json = ?, markdown = ?, tweets_json = ?,
 			 dms_json = ?, links_json = ?, feed_json = ?, error = null, finished_at = ?, updated_at = ?
 			 where id = ? and claim_token = ? and status = 'pending'`,
 		)
@@ -472,6 +560,7 @@ export function completePeriodDigestHistory(
 			result.serviceTier,
 			result.context.hash,
 			JSON.stringify(result.context.counts),
+			JSON.stringify(result.coverage ?? {}),
 			JSON.stringify(result.digest),
 			result.markdown,
 			JSON.stringify(compact.tweets),
@@ -517,20 +606,40 @@ export async function archivePeriodDigestDate(
 	}
 	const window = localWindowForDateKey(date);
 	try {
-		const result = await streamPeriodDigest({
-			period: "yesterday",
-			since: window.since,
-			until: window.until,
-			includeDms: false,
-			includeFeed: true,
-			twitterScope: "home",
-			refresh: false,
-			maxTweets: 5_000,
-			maxLinks: 25,
-			liveSync: false,
-			signal,
-			bufferModelDeltasUntilSuccess: true,
-		});
+		const result = await streamPeriodDigest(
+			{
+				period: "yesterday",
+				since: window.since,
+				until: window.until,
+				includeDms: false,
+				includeFeed: true,
+				twitterScope: "home",
+				refresh: false,
+				maxTweets: 5_000,
+				maxLinks: 25,
+				liveSync: false,
+				signal,
+				bufferModelDeltasUntilSuccess: true,
+				coverageMode: "complete",
+			},
+			{
+				onEvent: (event) => {
+					if (event.type === "start") {
+						initializePeriodDigestHistoryContext(
+							claim.id,
+							claim.claimToken,
+							event.context,
+						);
+					}
+				},
+				onCoverageProgress: (coverage) =>
+					updatePeriodDigestHistoryCoverage(
+						claim.id,
+						claim.claimToken,
+						coverage,
+					),
+			},
+		);
 		const completed = completePeriodDigestHistory(
 			claim.id,
 			claim.claimToken,

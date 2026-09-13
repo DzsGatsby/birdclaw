@@ -36,6 +36,13 @@ export interface DailyDigestHistoryListItem {
 	updatedAt: string;
 	finishedAt?: string;
 	pdfAvailable: boolean;
+	coverage?: {
+		expected: number;
+		processed: number;
+		complete: boolean;
+		sourceTruncated: boolean;
+		cited: number;
+	};
 }
 
 function displayDate(value: string) {
@@ -108,7 +115,7 @@ function HistoryRow({
 						{item.status === "ready"
 							? "Saved"
 							: item.status === "failed"
-								? "Retrying"
+								? "Failed"
 								: "Generating"}
 					</span>
 				</div>
@@ -124,6 +131,24 @@ function HistoryRow({
 					<span>{String(item.counts.home)} home</span>
 					<span aria-hidden="true">·</span>
 					<span>{String(item.counts.links)} links</span>
+					{item.coverage ? (
+						<>
+							<span aria-hidden="true">·</span>
+							<span>
+								{String(item.coverage.processed)}/
+								{String(item.coverage.expected)} reviewed
+								{item.coverage.complete
+									? ` · ${String(item.coverage.cited)} cited`
+									: ""}
+							</span>
+						</>
+					) : null}
+					{item.attemptCount > 1 ? (
+						<>
+							<span aria-hidden="true">·</span>
+							<span>attempt {String(item.attemptCount)}</span>
+						</>
+					) : null}
 				</div>
 			</button>
 			{ready ? (

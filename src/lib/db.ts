@@ -299,10 +299,11 @@ const BASE_SCHEMA_SQL = `
     provider text not null default '',
     model text not null default '',
     reasoning_effort text not null default '',
-    service_tier text not null default '',
-    context_hash text not null default '',
-    counts_json text not null default '{}',
-    digest_json text not null default '{}',
+	    service_tier text not null default '',
+	    context_hash text not null default '',
+	    counts_json text not null default '{}',
+	    coverage_json text not null default '{}',
+	    digest_json text not null default '{}',
     markdown text not null default '',
     tweets_json text not null default '[]',
     dms_json text not null default '[]',
@@ -333,10 +334,10 @@ const BASE_SCHEMA_SQL = `
     provider text not null default '',
     model text not null default '',
     reasoning_effort text not null default '',
-    service_tier text not null default '',
-    context_hash text not null default '',
-    counts_json text not null default '{}',
-    digest_json text not null default '{}',
+	    service_tier text not null default '',
+	    context_hash text not null default '',
+	    counts_json text not null default '{}',
+	    digest_json text not null default '{}',
     markdown text not null default '',
     tweets_json text not null default '[]',
     dms_json text not null default '[]',
@@ -1132,10 +1133,11 @@ function ensurePeriodDigestHistoryTable(db: Database) {
       provider text not null default '',
       model text not null default '',
       reasoning_effort text not null default '',
-      service_tier text not null default '',
-      context_hash text not null default '',
-      counts_json text not null default '{}',
-      digest_json text not null default '{}',
+	      service_tier text not null default '',
+	      context_hash text not null default '',
+	      counts_json text not null default '{}',
+	      coverage_json text not null default '{}',
+	      digest_json text not null default '{}',
       markdown text not null default '',
       tweets_json text not null default '[]',
       dms_json text not null default '[]',
@@ -1167,6 +1169,11 @@ function ensurePeriodDigestHistoryTable(db: Database) {
 	if (!columns.has("twitter_scope")) {
 		db.exec(
 			"alter table period_digest_history add column twitter_scope text not null default 'all' check (twitter_scope in ('home', 'all'))",
+		);
+	}
+	if (!columns.has("coverage_json")) {
+		db.exec(
+			"alter table period_digest_history add column coverage_json text not null default '{}'",
 		);
 	}
 }

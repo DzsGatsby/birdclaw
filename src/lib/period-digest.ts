@@ -25,7 +25,7 @@ import {
 	type OpenAIStreamState,
 	processOpenAIResponseSseChunk,
 } from "./openai-response-runtime";
-import { readSyncCache, writeSyncCache } from "./sync-cache";
+import { deleteSyncCache, readSyncCache, writeSyncCache } from "./sync-cache";
 import {
 	createProfilePrioritySnapshot,
 	type ProfilePrioritySnapshot,
@@ -34,6 +34,16 @@ import {
 	resolveSummaryModelSettings,
 	streamSummaryAnalysisEffect,
 } from "./summary-model-runtime";
+import {
+	assemblePeriodDigestCoverage,
+	buildPeriodDigestCoveragePrompt,
+	createPeriodDigestCoverageBatches,
+	type PeriodDigestCoverage,
+	type PeriodDigestCoverageBatchResult,
+	type PeriodDigestCoverageEmbeddedTweet,
+	type PeriodDigestCoverageInputTweet,
+	validatePeriodDigestCoverageBatch,
+} from "./period-digest-coverage";
 import { syncHomeTimelineEffect, type HomeTimelineMode } from "./timeline-live";
 import type {
 	EmbeddedTweet,
@@ -80,6 +90,7 @@ export interface PeriodDigestOptions {
 	reportProfile?: PeriodDigestReportProfile;
 	maxOutputTokens?: number;
 	prioritySnapshot?: ProfilePrioritySnapshot;
+	coverageMode?: "none" | "complete";
 }
 
 export interface PeriodDigestWindow {
@@ -98,11 +109,13 @@ export interface PeriodDigestRunResult {
 	serviceTier: string;
 	cached: boolean;
 	updatedAt: string;
+	coverage?: PeriodDigestCoverage;
 }
 
 export interface PeriodDigestStreamHandlers {
 	onDelta?: (delta: string) => void;
 	onEvent?: (event: PeriodDigestStreamEvent) => void;
+	onCoverageProgress?: (coverage: PeriodDigestCoverage) => void;
 }
 
 export type PeriodDigestStreamEvent =
@@ -208,6 +221,8 @@ interface CompactTweet {
 		createdAt: string;
 		text: string;
 	} | null;
+	quotedTweet?: PeriodDigestCoverageEmbeddedTweet | null;
+	retweetedTweet?: PeriodDigestCoverageEmbeddedTweet | null;
 }
 
 interface CompactDm {
@@ -251,6 +266,7 @@ export interface PeriodDigestContext {
 	links: CompactLink[];
 	feedItems?: FeedItem[];
 	priorityFingerprint?: string;
+	sourceTruncated?: boolean;
 	hash: string;
 }
 
@@ -364,6 +380,40 @@ function tweetUrl(handle: string, id: string) {
 	return `https://x.com/${handle}/status/${id}`;
 }
 
+function compactCoverageEmbeddedTweet(
+	item: EmbeddedTweet | null | undefined,
+): PeriodDigestCoverageEmbeddedTweet | null {
+	if (!item) return null;
+	return {
+		id: item.id,
+		author: item.author.handle,
+		name: item.author.displayName,
+		createdAt: item.createdAt,
+		text: item.text,
+		...(item.entities.article ? { article: item.entities.article } : {}),
+		...(item.entities.urls?.length
+			? {
+					links: item.entities.urls.map((link) => ({
+						url: link.expandedUrl || link.url,
+						...(link.title ? { title: link.title } : {}),
+						...(link.description !== undefined
+							? { description: link.description }
+							: {}),
+						...(link.siteName !== undefined ? { siteName: link.siteName } : {}),
+					})),
+				}
+			: {}),
+		...(item.media.length
+			? {
+					media: item.media.map((media) => ({
+						type: media.type,
+						...(media.altText ? { altText: media.altText } : {}),
+					})),
+				}
+			: {}),
+	};
+}
+
 function compactTweet(
 	source: PeriodDigestSourceKind,
 	item: ReturnType<typeof listTimelineItems>[number],
@@ -400,6 +450,8 @@ function compactTweet(
 		needsReply: !item.isReplied,
 		replyToId: item.replyToId ?? null,
 		replyToTweet,
+		quotedTweet: compactCoverageEmbeddedTweet(item.quotedTweet),
+		retweetedTweet: compactCoverageEmbeddedTweet(item.retweetedTweet),
 	};
 }
 
@@ -422,6 +474,8 @@ function compactEmbeddedTweet(item: EmbeddedTweet): CompactTweet {
 		needsReply: !item.isReplied,
 		replyToId: item.replyToId ?? null,
 		replyToTweet: null,
+		quotedTweet: null,
+		retweetedTweet: null,
 	};
 }
 
@@ -632,6 +686,7 @@ function contextHash(context: Omit<PeriodDigestContext, "hash">) {
 				includeDms: context.includeDms,
 				includeFeed: context.includeFeed,
 				twitterScope: context.twitterScope,
+				sourceTruncated: context.sourceTruncated,
 				priorityFingerprint: context.priorityFingerprint,
 				tweets: context.tweets.map((tweet) => [
 					tweet.id,
@@ -651,6 +706,10 @@ function contextHash(context: Omit<PeriodDigestContext, "hash">) {
 					tweet.replyToId,
 					tweet.replyToTweet?.id,
 					tweet.replyToTweet?.text,
+					tweet.entities,
+					tweet.media,
+					tweet.quotedTweet,
+					tweet.retweetedTweet,
 				]),
 				dms: context.dms.map((dm) => [
 					dm.id,
@@ -816,6 +875,7 @@ export function collectPeriodDigestContext(
 		includeDms: Boolean(options.includeDms),
 		includeFeed,
 		twitterScope,
+		sourceTruncated: tweets.length >= maxTweets,
 		counts: {
 			home: home.length,
 			mentions: mentions.length,
@@ -855,6 +915,13 @@ function reportProfileFromOptions(
 			? "weekly-deep-dive"
 			: "standard")
 	);
+}
+
+function coverageModeFromOptions(options: PeriodDigestOptions) {
+	return options.coverageMode === "complete" &&
+		reportProfileFromOptions(options) === "standard"
+		? "complete"
+		: "none";
 }
 
 function maxOutputTokensFromOptions(options: PeriodDigestOptions) {
@@ -1143,12 +1210,13 @@ function digestCacheKey(
 	options: PeriodDigestOptions,
 ) {
 	const parts = [
-		"period-digest:v6",
+		"period-digest:v7",
 		providerFromOptions(options),
 		modelFromOptions(options),
 		reasoningEffortFromOptions(options),
 		serviceTierFromOptions(options),
 		reportProfileFromOptions(options),
+		coverageModeFromOptions(options),
 		String(maxOutputTokensFromOptions(options)),
 		context.hash,
 	];
@@ -1187,12 +1255,13 @@ function latestDigestCacheKey(options: PeriodDigestOptions) {
 		reasoningEffort: reasoningEffortFromOptions(options),
 		serviceTier: serviceTierFromOptions(options),
 		reportProfile: reportProfileFromOptions(options),
+		coverageMode: coverageModeFromOptions(options),
 		maxOutputTokens: maxOutputTokensFromOptions(options),
 		priorityFingerprint:
 			options.prioritySnapshot?.fingerprint ??
 			createProfilePrioritySnapshot().fingerprint,
 	};
-	return `period-digest-latest:v5:${createHash("sha1")
+	return `period-digest-latest:v6:${createHash("sha1")
 		.update(JSON.stringify(identity))
 		.digest("hex")}`;
 }
@@ -1231,6 +1300,7 @@ function enrichContextWithCitedTweets(
 interface CachedPeriodDigestValue {
 	context?: PeriodDigestContext;
 	digest: PeriodDigest;
+	coverage?: PeriodDigestCoverage;
 	markdown: string;
 	model: string;
 	provider?: string;
@@ -1254,6 +1324,7 @@ function cachedDigestResult(
 		serviceTier: cached.value.serviceTier,
 		cached: true,
 		updatedAt: cached.value.updatedAt ?? cached.updatedAt,
+		...(cached.value.coverage ? { coverage: cached.value.coverage } : {}),
 	};
 }
 
@@ -1361,11 +1432,202 @@ function selectWeeklyPromptTweets(context: PeriodDigestContext) {
 	];
 }
 
+function coverageEmbeddedFromReply(
+	tweet: CompactTweet["replyToTweet"],
+): PeriodDigestCoverageEmbeddedTweet | null {
+	if (!tweet) return null;
+	return {
+		id: tweet.id,
+		author: tweet.author,
+		name: tweet.name,
+		createdAt: tweet.createdAt,
+		text: tweet.text,
+	};
+}
+
+function coverageInputTweet(
+	tweet: CompactTweet,
+): PeriodDigestCoverageInputTweet {
+	return {
+		id: tweet.id,
+		url: tweet.url,
+		author: tweet.author,
+		name: tweet.name,
+		createdAt: tweet.createdAt,
+		text: tweet.text,
+		specialFollow: Boolean(tweet.specialFollow),
+		replyTo: coverageEmbeddedFromReply(tweet.replyToTweet),
+		quotedTweet: tweet.quotedTweet ?? null,
+		retweetedTweet: tweet.retweetedTweet ?? null,
+		...(tweet.entities?.article ? { article: tweet.entities.article } : {}),
+		...(tweet.entities?.urls?.length
+			? {
+					links: tweet.entities.urls.map((link) => ({
+						url: link.expandedUrl || link.url,
+						...(link.title ? { title: link.title } : {}),
+						...(link.description !== undefined
+							? { description: link.description }
+							: {}),
+						...(link.siteName !== undefined ? { siteName: link.siteName } : {}),
+					})),
+				}
+			: {}),
+		...(tweet.media.length
+			? {
+					media: tweet.media.map((media) => ({
+						type: media.type,
+						...(media.altText ? { altText: media.altText } : {}),
+					})),
+				}
+			: {}),
+	};
+}
+
+interface PeriodDigestCoverageCheckpoint {
+	version: 1;
+	contextHash: string;
+	batchResults: PeriodDigestCoverageBatchResult[];
+}
+
+function coverageCheckpointKey(
+	context: PeriodDigestContext,
+	options: PeriodDigestOptions,
+) {
+	return [
+		"period-digest-coverage:v1",
+		providerFromOptions(options),
+		modelFromOptions(options),
+		reasoningEffortFromOptions(options),
+		context.hash,
+	].join(":");
+}
+
+function streamPeriodDigestCoverageEffect(
+	context: PeriodDigestContext,
+	options: PeriodDigestOptions,
+	handlers: PeriodDigestStreamHandlers,
+): Effect.Effect<PeriodDigestCoverage, Error> {
+	return Effect.gen(function* () {
+		const tweets = context.tweets.map(coverageInputTweet);
+		const batches = createPeriodDigestCoverageBatches(tweets);
+		const checkpointKey = coverageCheckpointKey(context, options);
+		const cached = yield* tryDigestSync(() =>
+			readSyncCache<PeriodDigestCoverageCheckpoint>(checkpointKey),
+		);
+		const completedByIndex = new Map<number, PeriodDigestCoverageBatchResult>();
+		if (
+			cached?.value.version === 1 &&
+			cached.value.contextHash === context.hash
+		) {
+			for (const candidate of cached.value.batchResults) {
+				const batch = batches[candidate.index];
+				if (!batch) continue;
+				try {
+					completedByIndex.set(
+						candidate.index,
+						validatePeriodDigestCoverageBatch(batch, {
+							batchSummary: candidate.batchSummary,
+							items: candidate.items.map((item) => ({
+								tweetId: item.tweetId,
+								disposition: item.disposition,
+								importance: item.importance,
+								topic: item.topic,
+								note: item.note,
+								...(item.duplicateOf ? { duplicateOf: item.duplicateOf } : {}),
+							})),
+						}),
+					);
+				} catch {
+					// Ignore stale or malformed partial checkpoints.
+				}
+			}
+		}
+		const progress = () =>
+			assemblePeriodDigestCoverage({
+				tweets,
+				batchResults: [...completedByIndex.values()],
+				sourceTruncated: Boolean(context.sourceTruncated),
+			});
+		handlers.onCoverageProgress?.(progress());
+		if (context.sourceTruncated) {
+			return yield* Effect.fail(
+				new Error(
+					"Complete coverage is unavailable because the timeline hit the maxTweets source cap",
+				),
+			);
+		}
+		for (const batch of batches) {
+			if (options.signal?.aborted) {
+				return yield* Effect.fail(
+					toError(
+						options.signal.reason ?? new Error("Digest coverage aborted"),
+					),
+				);
+			}
+			if (!completedByIndex.has(batch.index)) {
+				emitDigestStatus(
+					handlers,
+					`Reviewing every tweet · batch ${String(batch.index + 1)}/${String(batches.length)}`,
+					`${String(progress().processed)}/${String(tweets.length)} tweets verified`,
+				);
+				const stream = yield* streamSummaryAnalysisEffect({
+					body: createAnalysisRequestBody({
+						settings: resolveSummaryModelSettings(options),
+						system:
+							"You are a meticulous private-timeline coverage analyst. Account for every supplied top-level tweet exactly once and return strict structured output after the delimiter.",
+						prompt: buildPeriodDigestCoveragePrompt({
+							batch,
+							totalBatches: batches.length,
+							language: languageFromOptions(options),
+						}),
+						stream: true,
+						maxOutputTokens: 12_000,
+					}),
+					options,
+					signal: options.signal,
+					parse: (value) => validatePeriodDigestCoverageBatch(batch, value),
+					fallback: () => {
+						throw new Error(
+							`Coverage batch ${String(batch.index + 1)} returned malformed or incomplete JSON`,
+						);
+					},
+					bufferDeltasUntilSuccess: true,
+					onFailover: (target) =>
+						emitDigestStatus(
+							handlers,
+							"Coverage model unavailable",
+							`Switching batch ${String(batch.index + 1)} to ${target.provider === "deepseek" ? "DeepSeek V4 / Flash" : "ChatGPT"}.`,
+						),
+				});
+				completedByIndex.set(batch.index, stream.value);
+				yield* tryDigestSync(() =>
+					writeSyncCache(checkpointKey, {
+						version: 1,
+						contextHash: context.hash,
+						batchResults: [...completedByIndex.values()],
+					} satisfies PeriodDigestCoverageCheckpoint),
+				);
+			}
+			handlers.onCoverageProgress?.(progress());
+		}
+		const coverage = progress();
+		if (!coverage.complete) {
+			return yield* Effect.fail(
+				new Error(
+					`Coverage verification failed: ${String(coverage.processed)}/${String(coverage.expected)} tweets processed`,
+				),
+			);
+		}
+		return coverage;
+	});
+}
+
 function buildPrompt(
 	context: PeriodDigestContext,
 	options?: {
 		language?: string;
 		reportProfile?: PeriodDigestReportProfile;
+		coverage?: PeriodDigestCoverage;
 	},
 ) {
 	const language = normalizeDigestLanguage(options?.language);
@@ -1373,24 +1635,42 @@ function buildPrompt(
 	const selectedTweets = weeklyDeepDive
 		? selectWeeklyPromptTweets(context)
 		: prioritizeSpecialFollowTweets(context.tweets);
-	const promptTweets = selectedTweets.map((tweet) => ({
-		id: tweet.id,
-		url: tweet.url,
-		source: tweet.source,
-		author: tweet.author,
-		name: tweet.name,
-		bio: tweet.authorProfile.bio,
-		followersCount: tweet.authorProfile.followersCount,
-		createdAt: tweet.createdAt,
-		text: tweet.text,
-		likeCount: tweet.likeCount,
-		liked: tweet.liked,
-		bookmarked: tweet.bookmarked,
-		specialFollow: Boolean(tweet.specialFollow),
-		needsReply: tweet.needsReply,
-		replyToId: tweet.replyToId,
-		replyToTweet: tweet.replyToTweet,
-	}));
+	const promptTweets = options?.coverage
+		? options.coverage.items.map((item) => ({
+				id: item.tweetId,
+				url: item.url,
+				author: item.author,
+				name: item.name,
+				createdAt: item.createdAt,
+				specialFollow: item.specialFollow,
+				disposition: item.disposition,
+				importance: item.importance,
+				topic: item.topic,
+				note: item.note,
+				...(item.duplicateOf ? { duplicateOf: item.duplicateOf } : {}),
+			}))
+		: selectedTweets.map((tweet) => ({
+				id: tweet.id,
+				url: tweet.url,
+				source: tweet.source,
+				author: tweet.author,
+				name: tweet.name,
+				bio: tweet.authorProfile.bio,
+				followersCount: tweet.authorProfile.followersCount,
+				createdAt: tweet.createdAt,
+				text: tweet.text,
+				likeCount: tweet.likeCount,
+				liked: tweet.liked,
+				bookmarked: tweet.bookmarked,
+				specialFollow: Boolean(tweet.specialFollow),
+				needsReply: tweet.needsReply,
+				replyToId: tweet.replyToId,
+				replyToTweet: tweet.replyToTweet,
+				entities: tweet.entities,
+				media: tweet.media,
+				quotedTweet: tweet.quotedTweet,
+				retweetedTweet: tweet.retweetedTweet,
+			}));
 	let remainingArticleContentChars = weeklyDeepDive ? 240_000 : 500_000;
 	const promptFeedItems = [...(context.feedItems ?? [])]
 		.sort((left, right) => {
@@ -1441,6 +1721,13 @@ function buildPrompt(
 			feed: number,
 		) => ({
 			tweets: promptTweets.slice(0, tweets),
+			...(options?.coverage
+				? {
+						coverageBatchSummaries: options.coverage.batches.map(
+							(batch) => batch.summary,
+						),
+					}
+				: {}),
 			dms: context.dms.slice(0, dms),
 			links: context.links.slice(0, links),
 			feedItems: promptFeedItems.slice(0, feed),
@@ -1517,6 +1804,11 @@ function buildPrompt(
 		};
 	};
 	const { dataset, tweetCount, feedCount } = fitDataset();
+	if (options?.coverage && tweetCount !== options.coverage.expected) {
+		throw new Error(
+			"Complete coverage ledger exceeded the final prompt budget",
+		);
+	}
 
 	const reportRequirements = weeklyDeepDive
 		? `- This is a weekly deep-dive, not a daily digest. When the dataset is substantial, target 7,000-10,000 Chinese characters for zh-CN, or 2,500-3,500 words for other languages, supported by roughly 50-100 unique tweet citations. Do not pad thin datasets or repeat points merely to hit a length target.
@@ -1542,6 +1834,7 @@ Until: ${context.window.until}
 Sources: ${JSON.stringify(context.counts)}
 Prompt tweets: ${String(tweetCount)} of ${String(context.tweets.length)} selected context tweets
 Prompt feed items: ${String(feedCount)} of ${String(context.feedItems?.length ?? 0)} selected editorial items
+${options?.coverage ? `Coverage ledger: ${String(options.coverage.processed)}/${String(options.coverage.expected)} tweets processed across ${String(options.coverage.batches.length)} verified batches. The tweets dataset below is the verified per-tweet ledger, not raw tweets.` : ""}
 
 Write a high-signal "what happened" report from the user's Home timeline and optional editorial feed dataset.
 
@@ -1560,6 +1853,7 @@ ${reportRequirements}
 - Prefer important flashes for timely factual developments. For publisher articles, contentSource=full_text means content contains the fetched article body; read and synthesize that body instead of relying only on the title or excerpt. contentTruncated=true means the body was bounded for prompt size, so do not imply unseen details. Article content may be intentionally absent for restricted, high-risk, or analysis-tagged items; in that case use only the title, publisher, timestamp, and canonical link without inferring missing details.
 - For links: emit normal Markdown links with no space between the label and URL, e.g. [title](https://example.com), then cite the sharing tweet ids in the same bullet.
 - Prefer synthesis over chronology. Group repeated chatter into one bullet.
+- When a coverage ledger is present, consider every ledger item before writing. The final report may compress duplicate and low-signal items, but it must not ignore substantive or supporting items. "Processed" means reviewed, while sourceTweetIds means actually cited; do not claim those are the same measure.
 - Mention handles when useful, but do not make the report a list of handles.
 - Do not include a generic "Action items" section.
 - If there is no data, say that plainly in one short paragraph.
@@ -1652,6 +1946,7 @@ function processSseChunk(
 function createOpenAIRequestBody(
 	context: PeriodDigestContext,
 	options: PeriodDigestOptions,
+	coverage?: PeriodDigestCoverage,
 ) {
 	return createAnalysisRequestBody({
 		settings: resolveSummaryModelSettings(options),
@@ -1660,10 +1955,130 @@ function createOpenAIRequestBody(
 		prompt: buildPrompt(context, {
 			language: languageFromOptions(options),
 			reportProfile: reportProfileFromOptions(options),
+			coverage,
 		}),
 		stream: true,
 		maxOutputTokens: maxOutputTokensFromOptions(options),
 	});
+}
+
+function parsePeriodDigestValue(
+	context: PeriodDigestContext,
+	value: unknown,
+	coverage?: PeriodDigestCoverage,
+) {
+	const digest = PeriodDigestSchema.parse(value);
+	if (!coverage) return digest;
+	const knownTweetIds = new Set(
+		context.tweets.map((tweet) => tweet.id.replace(/^tweet[_:]/i, "")),
+	);
+	const includedTweetIds = new Set(
+		collectDigestTweetIds(digest).map((tweetId) =>
+			tweetId.replace(/^tweet[_:]/i, ""),
+		),
+	);
+	const unknown = [...includedTweetIds].filter(
+		(tweetId) => !knownTweetIds.has(tweetId),
+	);
+	if (unknown.length > 0) {
+		throw new Error(
+			`Digest returned ${String(new Set(unknown).size)} unknown tweet citations`,
+		);
+	}
+	return digest;
+}
+
+function requiredCoverageItems(coverage: PeriodDigestCoverage) {
+	return coverage.items.filter(
+		(item) =>
+			item.disposition === "substantive" ||
+			item.disposition === "supporting" ||
+			(item.specialFollow && item.disposition !== "unreadable"),
+	);
+}
+
+function markdownTweetIds(markdown: string) {
+	const tweetIds = new Set<string>();
+	for (const match of markdown.matchAll(/\btweet_([A-Za-z0-9_-]+)\b/gi)) {
+		if (match[1]) tweetIds.add(match[1].replace(/^tweet[_:]/i, ""));
+	}
+	return tweetIds;
+}
+
+function appendCoverageRegister(
+	markdown: string,
+	coverage: PeriodDigestCoverage,
+	language?: string,
+) {
+	const cited = markdownTweetIds(markdown);
+	const missing = requiredCoverageItems(coverage).filter(
+		(item) => !cited.has(item.tweetId.replace(/^tweet[_:]/i, "")),
+	);
+	if (missing.length === 0) return { markdown, appended: "" };
+	const chinese = (normalizeDigestLanguage(language) ?? DEFAULT_DIGEST_LANGUAGE)
+		.toLocaleLowerCase()
+		.startsWith("zh");
+	const title = chinese ? "逐条覆盖补录" : "Coverage register";
+	const introduction = chinese
+		? "以下重要条目已在分批审阅中逐条核验，但未被正文单独引用；现按核验笔记补录，避免遗漏。"
+		: "These important items were individually verified but not separately cited above, so their verified notes are included here to prevent omissions.";
+	const lines = missing.map((item) => {
+		const topic = item.topic.replace(/\s+/g, " ").trim();
+		const note = item.note.replace(/\s+/g, " ").trim();
+		const author = item.author.replace(/\s+/g, " ").trim();
+		const tweetId = item.tweetId.replace(/^tweet[_:]/i, "");
+		return `- **${topic}** · @${author}: ${note} (tweet_${tweetId})`;
+	});
+	const appended = `\n\n## ${title}\n\n${introduction}\n\n${lines.join("\n")}`;
+	return { markdown: `${markdown.trimEnd()}${appended}`, appended };
+}
+
+function ensureCoverageSourceTweets(
+	digest: PeriodDigest,
+	coverage: PeriodDigestCoverage,
+) {
+	return {
+		...digest,
+		sourceTweetIds: [
+			...new Set([
+				...digest.sourceTweetIds,
+				...requiredCoverageItems(coverage).map((item) => item.tweetId),
+			]),
+		],
+	};
+}
+
+function coverageMarkdownTweetIds(
+	context: PeriodDigestContext,
+	digest: PeriodDigest,
+	markdown: string,
+) {
+	const knownTweetIds = new Set(
+		context.tweets.map((tweet) => tweet.id.replace(/^tweet[_:]/i, "")),
+	);
+	const structuredTweetIds = new Set(
+		collectDigestTweetIds(digest).map((tweetId) =>
+			tweetId.replace(/^tweet[_:]/i, ""),
+		),
+	);
+	const citedTweetIds = markdownTweetIds(markdown);
+	const unknown = [...citedTweetIds].filter(
+		(tweetId) => !knownTweetIds.has(tweetId),
+	);
+	if (unknown.length > 0) {
+		throw new Error(
+			`Digest Markdown cited ${String(unknown.length)} unknown tweet ids`,
+		);
+	}
+	const unregistered = [...citedTweetIds].filter(
+		(tweetId) => !structuredTweetIds.has(tweetId),
+	);
+	if (unregistered.length > 0) {
+		throw new Error(
+			`Digest Markdown cited ${String(unregistered.length)} tweet ids missing from structured output`,
+		);
+	}
+	return citedTweetIds;
 }
 
 function completeOpenAIStreamEffect(
@@ -1671,9 +2086,29 @@ function completeOpenAIStreamEffect(
 	context: PeriodDigestContext,
 	options: PeriodDigestOptions,
 	handlers: PeriodDigestStreamHandlers,
+	coverage?: PeriodDigestCoverage,
 ): Effect.Effect<PeriodDigestRunResult, Error> {
 	return Effect.gen(function* () {
-		const digest = ensureSpecialFollowSourceTweets(context, stream.value);
+		const digest = coverage
+			? ensureCoverageSourceTweets(stream.value, coverage)
+			: ensureSpecialFollowSourceTweets(context, stream.value);
+		const rendered = coverage
+			? appendCoverageRegister(
+					stream.markdown,
+					coverage,
+					languageFromOptions(options),
+				)
+			: { markdown: stream.markdown, appended: "" };
+		const finalCoverage = coverage
+			? (() => {
+					const cited = coverageMarkdownTweetIds(
+						context,
+						digest,
+						rendered.markdown,
+					);
+					return { ...coverage, cited: cited.size };
+				})()
+			: undefined;
 		const enrichedContext = yield* tryDigestSync(() =>
 			enrichContextWithCitedTweets(context, digest),
 		);
@@ -1681,26 +2116,32 @@ function completeOpenAIStreamEffect(
 		const updatedAt = yield* tryDigestSync(() =>
 			writeSyncCache(cacheKey, {
 				digest,
-				markdown: stream.markdown,
+				markdown: rendered.markdown,
 				model: stream.model ?? modelFromOptions(options),
 				provider: stream.provider ?? providerFromOptions(options),
 				reasoningEffort: reasoningEffortFromOptions(options),
 				serviceTier: serviceTierFromOptions(options),
 				usage: stream.usage,
 				responseId: stream.responseId,
+				...(finalCoverage ? { coverage: finalCoverage } : {}),
 			}),
 		);
 		const result: PeriodDigestRunResult = {
 			context: enrichedContext,
 			digest,
-			markdown: stream.markdown,
+			markdown: rendered.markdown,
 			model: stream.model ?? modelFromOptions(options),
 			provider: stream.provider ?? providerFromOptions(options),
 			reasoningEffort: reasoningEffortFromOptions(options),
 			serviceTier: serviceTierFromOptions(options),
 			cached: false,
 			updatedAt,
+			...(finalCoverage ? { coverage: finalCoverage } : {}),
 		};
+		if (rendered.appended) {
+			handlers.onDelta?.(rendered.appended);
+			handlers.onEvent?.({ type: "delta", delta: rendered.appended });
+		}
 		yield* tryDigestSync(() =>
 			writeSyncCache(latestDigestCacheKey(options), {
 				context: result.context,
@@ -1711,8 +2152,14 @@ function completeOpenAIStreamEffect(
 				reasoningEffort: result.reasoningEffort,
 				serviceTier: result.serviceTier,
 				updatedAt: result.updatedAt,
+				...(result.coverage ? { coverage: result.coverage } : {}),
 			}),
 		);
+		if (finalCoverage) {
+			yield* tryDigestSync(() =>
+				deleteSyncCache(coverageCheckpointKey(context, options)),
+			);
+		}
 		handlers.onEvent?.({ type: "done", result });
 		return result;
 	});
@@ -1835,6 +2282,7 @@ export function streamPeriodDigestEffect(
 					reasoningEffort: result.reasoningEffort,
 					serviceTier: result.serviceTier,
 					updatedAt: result.updatedAt,
+					...(result.coverage ? { coverage: result.coverage } : {}),
 				}),
 			);
 			emitCachedDigest(result, handlers);
@@ -1859,16 +2307,54 @@ export function streamPeriodDigestEffect(
 		cacheKey = digestCacheKey(context, resolvedOptions);
 
 		handlers.onEvent?.({ type: "start", context, cached: false });
-		emitDigestStatus(handlers, "Streaming AI summary");
+		const coverage =
+			coverageModeFromOptions(resolvedOptions) === "complete"
+				? yield* streamPeriodDigestCoverageEffect(
+						context,
+						resolvedOptions,
+						handlers,
+					)
+				: undefined;
+		emitDigestStatus(
+			handlers,
+			coverage
+				? "Writing summary from verified coverage"
+				: "Streaming AI summary",
+		);
 		const stream = yield* streamSummaryAnalysisEffect({
-			body: createOpenAIRequestBody(context, resolvedOptions),
+			body: createOpenAIRequestBody(context, resolvedOptions, coverage),
 			options: resolvedOptions,
 			signal: resolvedOptions.signal,
-			parse: (value) => PeriodDigestSchema.parse(value),
-			fallback: (markdown) =>
-				fallbackDigest(context, markdown, languageFromOptions(resolvedOptions)),
+			parse: (value) => parsePeriodDigestValue(context, value, coverage),
+			fallback: (markdown) => {
+				if (coverage) {
+					throw new Error(
+						"Complete coverage summary returned malformed or incomplete JSON",
+					);
+				}
+				return fallbackDigest(
+					context,
+					markdown,
+					languageFromOptions(resolvedOptions),
+				);
+			},
 			delimiterPattern: DELIMITER_PATTERN,
+			validateResult: coverage
+				? (candidate) => {
+						const digest = ensureCoverageSourceTweets(
+							candidate.value,
+							coverage,
+						);
+						const rendered = appendCoverageRegister(
+							candidate.markdown,
+							coverage,
+							languageFromOptions(resolvedOptions),
+						);
+						coverageMarkdownTweetIds(context, digest, rendered.markdown);
+					}
+				: undefined,
 			bufferDeltasUntilSuccess:
+				Boolean(coverage) ||
 				resolvedOptions.bufferModelDeltasUntilSuccess === true,
 			onDelta: (delta) => {
 				handlers.onDelta?.(delta);
@@ -1886,6 +2372,7 @@ export function streamPeriodDigestEffect(
 			context,
 			resolvedOptions,
 			handlers,
+			coverage,
 		);
 	});
 }
@@ -1906,6 +2393,9 @@ export const __test__ = {
 	normalizeDigestLanguage,
 	readOpenAIStreamEffect,
 	parseDigestFromHybridText,
+	parsePeriodDigestValue,
+	coverageMarkdownTweetIds,
+	appendCoverageRegister,
 	resolveRefreshScope,
 	processSseChunk,
 	resolvePeriodDigestWindow,

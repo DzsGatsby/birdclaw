@@ -93,6 +93,7 @@ describe("api period digest route", () => {
 				maxFeedItems: undefined,
 				liveSync: true,
 				liveSyncMode: "xurl",
+				coverageMode: "complete",
 				liveTimelineLimit: undefined,
 				liveTimelineMaxPages: undefined,
 				signal: expect.any(AbortSignal),

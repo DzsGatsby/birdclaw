@@ -48,6 +48,7 @@ function parseOptions(url: URL): PeriodDigestOptions {
 		}),
 		liveSync: url.searchParams.get("liveSync") !== "false",
 		liveSyncMode: "xurl",
+		coverageMode: "complete",
 		liveTimelineLimit: parseBoundedInteger(
 			url.searchParams.get("liveTimelineLimit"),
 			{ max: 100_000 },

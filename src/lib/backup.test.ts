@@ -1234,6 +1234,31 @@ describe("text backup", () => {
 		expect((await validateBackup(secondRepoPath)).ok).toBe(true);
 	}, 20000);
 
+	it("imports daily history rows created before coverage metadata existed", async () => {
+		switchHome("birdclaw-backup-legacy-coverage-src-");
+		seedBackupFixture();
+		const repoPath = makeTempDir("birdclaw-backup-legacy-coverage-repo-");
+		await exportBackup({ repoPath });
+
+		const dailyPath = path.join(repoPath, "data/digests/daily-history.jsonl");
+		const row = JSON.parse(readFileSync(dailyPath, "utf8")) as Record<
+			string,
+			unknown
+		>;
+		delete row.coverage_json;
+		writeFileSync(dailyPath, `${JSON.stringify(row)}\n`);
+
+		switchHome("birdclaw-backup-legacy-coverage-dest-");
+		await importBackup({ repoPath, mode: "replace", validate: false });
+		expect(
+			getNativeDb({ seedDemoData: false })
+				.prepare(
+					"select coverage_json from period_digest_history where digest_date = '2025-01-08'",
+				)
+				.get(),
+		).toEqual({ coverage_json: "{}" });
+	}, 20000);
+
 	it("imports schema-v10 history without feed fields or feed items", async () => {
 		switchHome("birdclaw-backup-legacy-feed-src-");
 		seedBackupFixture();

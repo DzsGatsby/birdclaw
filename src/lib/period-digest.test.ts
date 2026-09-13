@@ -728,6 +728,107 @@ describe("period digest", () => {
 		expect(body.max_output_tokens).toBe(7_000);
 	});
 
+	it("reviews every tweet in verified batches before writing a complete summary", async () => {
+		const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
+			const body = JSON.parse(String(init?.body)) as {
+				input: Array<{ content: string }>;
+			};
+			const prompt = body.input.at(-1)?.content ?? "";
+			if (prompt.includes("This is coverage batch")) {
+				const marker = "\nTweets:\n";
+				const tweets = JSON.parse(
+					prompt.slice(prompt.lastIndexOf(marker) + marker.length),
+				) as Array<{ id: string }>;
+				const value = {
+					batchSummary: "Verified every tweet in this batch.",
+					items: tweets.map((tweet) => ({
+						tweetId: tweet.id,
+						disposition: "substantive",
+						importance: "medium",
+						topic: "Updates",
+						note: "A distinct update for the final synthesis.",
+					})),
+				};
+				return streamResponse(
+					[
+						sseFrame({
+							type: "response.output_text.delta",
+							delta: `Batch verified.\n\n---\n${JSON.stringify(value)}`,
+						}),
+						"data: [DONE]\n\n",
+					].join(""),
+				);
+			}
+			const ledger = JSON.parse(
+				prompt.slice(
+					prompt.lastIndexOf("\nDataset:\n") + "\nDataset:\n".length,
+				),
+			) as { tweets: Array<{ id: string }> };
+			const cited = ledger.tweets[0]?.id;
+			return streamResponse(
+				[
+					sseFrame({
+						type: "response.output_text.delta",
+						delta: `# Complete\n\nCovered all inputs.${cited ? ` (tweet_${cited})` : ""}\n\n---\n${JSON.stringify(
+							{
+								title: "Complete",
+								summary: "Covered all inputs.",
+								keyTopics: [],
+								notableLinks: [],
+								people: [],
+								actionItems: [],
+								sourceTweetIds: cited ? [cited] : [],
+							},
+						)}`,
+					}),
+					"data: [DONE]\n\n",
+				].join(""),
+			);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const result = await streamPeriodDigest({
+			since: "2026-01-01T00:00:00.000Z",
+			until: "2027-01-01T00:00:00.000Z",
+			refresh: true,
+			maxTweets: 20,
+			twitterScope: "home",
+			coverageMode: "complete",
+		});
+
+		expect(result.coverage).toMatchObject({
+			expected: result.context.tweets.length,
+			processed: result.context.tweets.length,
+			complete: true,
+			missingTweetIds: [],
+			cited: result.context.tweets.length,
+		});
+		expect(result.coverage?.items.map((item) => item.tweetId)).toEqual(
+			result.context.tweets.map((tweet) => tweet.id),
+		);
+		expect(result.markdown).toContain("## 逐条覆盖补录");
+		for (const tweet of result.context.tweets) {
+			expect(result.markdown).toContain(
+				`tweet_${tweet.id.replace(/^tweet[_:]/i, "")}`,
+			);
+			expect(result.digest.sourceTweetIds).toContain(tweet.id);
+		}
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(
+			getNativeDb()
+				.prepare(
+					"select count(*) as count from sync_cache where cache_key like 'period-digest-coverage:%'",
+				)
+				.get(),
+		).toEqual({ count: 0 });
+		expect(() =>
+			__test__.coverageMarkdownTweetIds(
+				result.context,
+				result.digest,
+				"Invented citation (tweet_not_in_context)",
+			),
+		).toThrow(/unknown tweet ids/);
+	});
+
 	it("sends the expanded output budget for weekly deep-dives", async () => {
 		const streamed = [
 			sseFrame({
@@ -1165,7 +1266,7 @@ describe("period digest", () => {
 				`
 				update sync_cache
 				set updated_at = '2020-01-01T00:00:00.000Z'
-				where cache_key like 'period-digest:v6:%'
+					where cache_key like 'period-digest:v7:%'
 				`,
 			)
 			.run();

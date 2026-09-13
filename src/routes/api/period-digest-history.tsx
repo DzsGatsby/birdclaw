@@ -1,10 +1,13 @@
 import fs from "node:fs/promises";
 import { createFileRoute } from "@tanstack/react-router";
+import { z } from "zod";
 import { ensureDailyDigestPdf } from "#/lib/daily-digest-pdf";
 import {
 	getPeriodDigestHistory,
 	listPeriodDigestHistory,
+	localWindowForDateKey,
 } from "#/lib/period-digest-history";
+import { queuePeriodDigestDate } from "#/lib/period-digest-scheduler";
 import {
 	jsonResponse,
 	parseBoundedInteger,
@@ -17,6 +20,11 @@ function notFound() {
 		{ status: 404 },
 	);
 }
+
+const retrySchema = z.object({
+	action: z.literal("retry"),
+	date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+});
 
 export const Route = createFileRoute("/api/period-digest-history")({
 	server: {
@@ -62,6 +70,35 @@ export const Route = createFileRoute("/api/period-digest-history")({
 									: "Daily digest PDF generation failed",
 						},
 						{ status: 503 },
+					);
+				}
+			},
+			POST: async ({ request }) => {
+				const denied = sensitiveRequestErrorResponse(request);
+				if (denied) return denied;
+				const parsed = retrySchema.safeParse(
+					await request.json().catch(() => null),
+				);
+				if (!parsed.success) {
+					return jsonResponse(
+						{ ok: false, message: "Daily digest retry request is invalid" },
+						{ status: 400 },
+					);
+				}
+				try {
+					localWindowForDateKey(parsed.data.date);
+					queuePeriodDigestDate(parsed.data.date);
+					return jsonResponse(
+						{ ok: true, date: parsed.data.date, status: "queued" },
+						{ status: 202 },
+					);
+				} catch (error) {
+					return jsonResponse(
+						{
+							ok: false,
+							message: error instanceof Error ? error.message : String(error),
+						},
+						{ status: 400 },
 					);
 				}
 			},

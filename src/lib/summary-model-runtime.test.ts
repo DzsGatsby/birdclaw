@@ -35,7 +35,53 @@ function deepSeekStream() {
 	);
 }
 
+function openAIStream(answer: string) {
+	const text = `Primary complete.\n\n---\n${JSON.stringify({ answer, summary: "primary" })}`;
+	return new Response(
+		`data: ${JSON.stringify({ type: "response.output_text.delta", delta: text })}\n\ndata: [DONE]\n\n`,
+		{ headers: { "content-type": "text/event-stream" } },
+	);
+}
+
 describe("summary model runtime", () => {
+	it("keeps both provider failures when primary and backup are unavailable", async () => {
+		const fetch = vi
+			.fn()
+			.mockResolvedValueOnce(
+				new Response('{"error":{"message":"no available accounts"}}', {
+					status: 400,
+				}),
+			)
+			.mockResolvedValueOnce(
+				new Response('{"error":{"message":"Insufficient Balance"}}', {
+					status: 402,
+				}),
+			);
+		const runtime = createRuntimeServices({
+			fetch,
+			env: (name) =>
+				name === "OPENAI_API_KEY"
+					? "openai-test-key"
+					: name === "DEEPSEEK_API_KEY"
+						? "deepseek-test-key"
+						: undefined,
+		});
+		await expect(
+			Effect.runPromise(
+				streamSummaryAnalysisEffect({
+					body: { input: [], stream: true },
+					options: {},
+					runtime,
+					parse: (value) => value,
+					fallback: () => ({}),
+					bufferDeltasUntilSuccess: true,
+				}),
+			),
+		).rejects.toThrow(
+			/openai: .*no available accounts.*deepseek: .*Insufficient Balance/,
+		);
+	});
+
 	it("redacts API keys embedded in DeepSeek SSE errors", () => {
 		const state = {
 			buffer: "",
@@ -107,6 +153,44 @@ describe("summary model runtime", () => {
 			model: "deepseek-v4-flash",
 			value: { answer: "backup", summary: "recovered" },
 		});
+	});
+
+	it("fails over before emitting when result-level validation rejects a provider", async () => {
+		const fetch = vi
+			.fn()
+			.mockResolvedValueOnce(openAIStream("primary"))
+			.mockResolvedValueOnce(deepSeekStream());
+		const runtime = createRuntimeServices({
+			fetch,
+			env: (name) => {
+				if (name === "OPENAI_API_KEY") return "openai-test-key";
+				if (name === "DEEPSEEK_API_KEY") return "deepseek-test-key";
+				return undefined;
+			},
+		});
+		const deltas: string[] = [];
+		const result = await Effect.runPromise(
+			streamSummaryAnalysisEffect({
+				body: { input: [], stream: true },
+				options: {},
+				runtime,
+				parse: (value) => value as { answer: string; summary: string },
+				fallback: () => ({ answer: "fallback", summary: "fallback" }),
+				validateResult: (candidate) => {
+					if (candidate.value.answer === "primary") {
+						throw new Error("primary result failed coverage validation");
+					}
+				},
+				onDelta: (delta) => deltas.push(delta),
+				bufferDeltasUntilSuccess: true,
+			}),
+		);
+
+		expect(fetch).toHaveBeenCalledTimes(2);
+		expect(result.provider).toBe("deepseek");
+		expect(result.value.answer).toBe("backup");
+		expect(deltas.join("")).toContain("Backup complete.");
+		expect(deltas.join("")).not.toContain("Primary complete.");
 	});
 
 	it("does not splice providers after interactive text was emitted", async () => {

@@ -1,5 +1,6 @@
 import path from "node:path";
 import { getBirdclawPaths } from "./config";
+import { digestRetryDelayMs } from "./digest-retry";
 import {
 	archiveIntradayDigestSlot,
 	latestCompletedIntradaySlotKey,
@@ -15,7 +16,6 @@ import {
 } from "./scheduled-job";
 
 const LOCK_STALE_MS = 2 * 60 * 60_000;
-const RETRY_DELAY_MS = 5 * 60_000;
 const MAX_CATCH_UP_SLOTS = 3;
 
 interface IntradayDigestSchedulerDependencies {
@@ -106,12 +106,19 @@ class IntradayDigestScheduler {
 		this.boundaryTimer.unref?.();
 	}
 
-	private scheduleRetry(slotKey: string) {
+	private scheduleRetry(slotKey: string, error?: unknown) {
 		if (this.stopped || this.retryTimers.has(slotKey)) return;
-		const timer = setTimeout(() => {
-			this.retryTimers.delete(slotKey);
-			this.queue(slotKey);
-		}, RETRY_DELAY_MS);
+		const attemptCount =
+			listPeriodDigestHistory({ kind: "intraday", limit: 366 }).find(
+				(item) => item.archiveKey === slotKey,
+			)?.attemptCount ?? 1;
+		const timer = setTimeout(
+			() => {
+				this.retryTimers.delete(slotKey);
+				this.queue(slotKey);
+			},
+			digestRetryDelayMs(attemptCount, error),
+		);
 		this.retryTimers.set(slotKey, timer);
 		timer.unref?.();
 	}
@@ -130,7 +137,7 @@ class IntradayDigestScheduler {
 		if (!slotKey) return;
 		this.pendingSlots.delete(slotKey);
 		this.inFlight = this.run(slotKey)
-			.catch(() => this.scheduleRetry(slotKey))
+			.catch((error) => this.scheduleRetry(slotKey, error))
 			.finally(() => {
 				this.inFlight = undefined;
 				this.drain();
@@ -174,7 +181,7 @@ class IntradayDigestScheduler {
 				),
 				...job.finish(),
 			});
-			this.scheduleRetry(slotKey);
+			this.scheduleRetry(slotKey, error);
 		} finally {
 			if (this.activeAbort === abort) this.activeAbort = undefined;
 			await release();

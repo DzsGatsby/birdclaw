@@ -25,6 +25,24 @@ afterEach(() => {
 });
 
 describe("daily digest scheduler", () => {
+	it("backs off repeated failures and cools down terminal provider errors", () => {
+		expect(__test__.retryDelayMs(1, new Error("temporary 503"))).toBe(
+			5 * 60_000,
+		);
+		expect(__test__.retryDelayMs(2, new Error("temporary 503"))).toBe(
+			10 * 60_000,
+		);
+		expect(__test__.retryDelayMs(99, new Error("temporary 503"))).toBe(
+			60 * 60_000,
+		);
+		expect(
+			__test__.retryDelayMs(
+				1,
+				new Error("DeepSeek request failed: 402 Insufficient Balance"),
+			),
+		).toBe(6 * 60 * 60_000);
+	});
+
 	it("starts with yesterday only on a fresh archive", () => {
 		expect(__test__.startupDigestDates(new Date(2026, 7, 1, 8))).toEqual([
 			"2026-07-31",

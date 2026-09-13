@@ -1112,7 +1112,7 @@ const definitions = {
 		exportSql: `
       select id, digest_date, timezone, status, attempt_count, window_since,
 		window_until, include_dms, include_feed, twitter_scope, provider, model, reasoning_effort,
-        service_tier, context_hash, counts_json, digest_json, markdown,
+	        service_tier, context_hash, counts_json, coverage_json, digest_json, markdown,
 		tweets_json, dms_json, links_json, feed_json, error, started_at, finished_at,
         created_at, updated_at
       from period_digest_history
@@ -1126,10 +1126,10 @@ const definitions = {
       insert into period_digest_history (
         id, digest_date, timezone, status, attempt_count, window_since,
 		window_until, include_dms, include_feed, twitter_scope, provider, model, reasoning_effort,
-        service_tier, context_hash, counts_json, digest_json, markdown,
+	        service_tier, context_hash, counts_json, coverage_json, digest_json, markdown,
 		tweets_json, dms_json, links_json, feed_json, error, started_at, finished_at,
         created_at, updated_at
-	  ) values (?, ?, ?, 'ready', coalesce(?, 1), ?, ?, coalesce(?, 0), coalesce(?, 0), coalesce(?, 'all'), ?, ?, ?, ?, ?, ?, ?, ?, coalesce(?, '[]'), coalesce(?, '[]'), coalesce(?, '[]'), coalesce(?, '[]'), ?, ?, ?, ?, ?)
+		  ) values (?, ?, ?, 'ready', coalesce(?, 1), ?, ?, coalesce(?, 0), coalesce(?, 0), coalesce(?, 'all'), ?, ?, ?, ?, ?, ?, coalesce(?, '{}'), ?, ?, coalesce(?, '[]'), coalesce(?, '[]'), coalesce(?, '[]'), coalesce(?, '[]'), ?, ?, ?, ?, ?)
       on conflict(digest_date) do update set
         timezone = excluded.timezone,
         status = 'ready',
@@ -1144,7 +1144,8 @@ const definitions = {
         reasoning_effort = excluded.reasoning_effort,
         service_tier = excluded.service_tier,
         context_hash = excluded.context_hash,
-        counts_json = excluded.counts_json,
+	        counts_json = excluded.counts_json,
+	        coverage_json = excluded.coverage_json,
         digest_json = excluded.digest_json,
         markdown = excluded.markdown,
         tweets_json = excluded.tweets_json,
@@ -1174,6 +1175,7 @@ const definitions = {
 				"service_tier",
 				"context_hash",
 				"counts_json",
+				"coverage_json",
 				"digest_json",
 				"markdown",
 				"tweets_json",

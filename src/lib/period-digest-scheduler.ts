@@ -1,6 +1,7 @@
 import path from "node:path";
 import { getBirdclawPaths } from "./config";
 import { ensureDailyDigestPdf } from "./daily-digest-pdf";
+import { digestRetryDelayMs } from "./digest-retry";
 import {
 	archivePeriodDigestDate,
 	listPeriodDigestHistory,
@@ -15,7 +16,6 @@ import {
 } from "./scheduled-job";
 
 const LOCK_STALE_MS = 2 * 60 * 60_000;
-const RETRY_DELAY_MS = 5 * 60_000;
 
 interface DailyDigestSchedulerDependencies {
 	archive: typeof archivePeriodDigestDate;
@@ -88,7 +88,7 @@ class DailyDigestScheduler {
 
 	start() {
 		this.scheduleMidnight();
-		for (const date of startupDigestDates()) this.queue(date);
+		for (const date of startupDigestDates()) this.queueDate(date);
 	}
 
 	stop() {
@@ -105,22 +105,29 @@ class DailyDigestScheduler {
 		if (this.stopped) return;
 		this.midnightTimer = setTimeout(() => {
 			this.scheduleMidnight();
-			for (const date of startupDigestDates()) this.queue(date);
+			for (const date of startupDigestDates()) this.queueDate(date);
 		}, nextLocalMidnightDelay());
 		this.midnightTimer.unref?.();
 	}
 
-	private scheduleRetry(date: string) {
+	private scheduleRetry(date: string, error?: unknown) {
 		if (this.stopped || this.retryTimers.has(date)) return;
-		const timer = setTimeout(() => {
-			this.retryTimers.delete(date);
-			this.queue(date);
-		}, RETRY_DELAY_MS);
+		const attemptCount =
+			listPeriodDigestHistory({ limit: 366 }).find(
+				(item) => item.archiveKey === date,
+			)?.attemptCount ?? 1;
+		const timer = setTimeout(
+			() => {
+				this.retryTimers.delete(date);
+				this.queueDate(date);
+			},
+			digestRetryDelayMs(attemptCount, error),
+		);
 		this.retryTimers.set(date, timer);
 		timer.unref?.();
 	}
 
-	private queue(date: string) {
+	queueDate(date: string) {
 		if (this.stopped) return;
 		this.pendingDates.add(date);
 		this.drain();
@@ -132,7 +139,7 @@ class DailyDigestScheduler {
 		if (!date) return;
 		this.pendingDates.delete(date);
 		this.inFlight = this.run(date)
-			.catch(() => this.scheduleRetry(date))
+			.catch((error) => this.scheduleRetry(date, error))
 			.finally(() => {
 				this.inFlight = undefined;
 				this.drain();
@@ -186,7 +193,7 @@ class DailyDigestScheduler {
 				),
 				...job.finish(),
 			});
-			this.scheduleRetry(date);
+			this.scheduleRetry(date, error);
 		} finally {
 			if (this.activeAbort === abort) this.activeAbort = undefined;
 			await release();
@@ -206,8 +213,17 @@ export function stopPeriodDigestScheduler() {
 	activeManager = undefined;
 }
 
+export function queuePeriodDigestDate(date: string) {
+	if (!activeManager) {
+		activeManager = new DailyDigestScheduler();
+		activeManager.start();
+	}
+	activeManager.queueDate(date);
+}
+
 export const __test__ = {
 	DailyDigestScheduler,
 	nextLocalMidnightDelay,
+	retryDelayMs: digestRetryDelayMs,
 	startupDigestDates,
 };

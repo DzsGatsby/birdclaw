@@ -1,6 +1,7 @@
 import path from "node:path";
 import { getBirdclawPaths } from "./config";
 import { ensureWeeklyDigestPdf } from "./daily-digest-pdf";
+import { digestRetryDelayMs } from "./digest-retry";
 import { redactProviderError } from "./openai-response-runtime";
 import {
 	acquireScheduledJobLock,
@@ -16,7 +17,6 @@ import {
 } from "./weekly-digest-history";
 
 const LOCK_STALE_MS = 2 * 60 * 60_000;
-const RETRY_DELAY_MS = 5 * 60_000;
 const MAX_BACKFILL_WEEKS = 12;
 
 interface WeeklyDigestSchedulerDependencies {
@@ -118,12 +118,19 @@ class WeeklyDigestScheduler {
 		this.midnightTimer.unref?.();
 	}
 
-	private scheduleRetry(weekStart: string) {
+	private scheduleRetry(weekStart: string, error?: unknown) {
 		if (this.stopped || this.retryTimers.has(weekStart)) return;
-		const timer = setTimeout(() => {
-			this.retryTimers.delete(weekStart);
-			this.queue(weekStart);
-		}, RETRY_DELAY_MS);
+		const attemptCount =
+			listWeeklyDigestHistory({ limit: 260 }).find(
+				(item) => item.date === weekStart,
+			)?.attemptCount ?? 1;
+		const timer = setTimeout(
+			() => {
+				this.retryTimers.delete(weekStart);
+				this.queue(weekStart);
+			},
+			digestRetryDelayMs(attemptCount, error),
+		);
 		this.retryTimers.set(weekStart, timer);
 		timer.unref?.();
 	}
@@ -142,7 +149,7 @@ class WeeklyDigestScheduler {
 		if (!weekStart) return;
 		this.pendingWeeks.delete(weekStart);
 		this.inFlight = this.run(weekStart)
-			.catch(() => this.scheduleRetry(weekStart))
+			.catch((error) => this.scheduleRetry(weekStart, error))
 			.finally(() => {
 				this.inFlight = undefined;
 				this.drain();
@@ -196,7 +203,7 @@ class WeeklyDigestScheduler {
 				),
 				...job.finish(),
 			});
-			this.scheduleRetry(weekStart);
+			this.scheduleRetry(weekStart, error);
 		} finally {
 			if (this.activeAbort === abort) this.activeAbort = undefined;
 			await release();

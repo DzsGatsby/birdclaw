@@ -11,13 +11,16 @@ import {
 	completePeriodDigestHistory,
 	failPeriodDigestHistory,
 	getPeriodDigestHistory,
+	initializePeriodDigestHistoryContext,
 	latestCompletedIntradaySlotKey,
 	listPeriodDigestHistory,
 	localWindowForDateKey,
 	localWindowForIntradaySlotKey,
 	nextIntradaySlotKey,
 	previousIntradaySlotKey,
+	updatePeriodDigestHistoryCoverage,
 } from "./period-digest-history";
+import type { PeriodDigestCoverage } from "./period-digest-coverage";
 import type { PeriodDigestRunResult } from "./period-digest";
 
 let temporaryHome = "";
@@ -104,6 +107,48 @@ afterEach(() => {
 });
 
 describe("daily period digest history", () => {
+	it("preserves real counts and verified batch progress after model failure", () => {
+		const claim = claimPeriodDigestDate("2026-09-12");
+		if (!claim.claimed) throw new Error("Expected claim");
+		const context = resultForDate("2026-09-12").context;
+		expect(
+			initializePeriodDigestHistoryContext(claim.id, claim.claimToken, context),
+		).toBe(true);
+		const coverage: PeriodDigestCoverage = {
+			version: 1,
+			expected: 4,
+			processed: 2,
+			complete: false,
+			sourceTruncated: false,
+			missingTweetIds: ["3", "4"],
+			cited: 0,
+			dispositions: {
+				substantive: 1,
+				supporting: 1,
+				duplicate: 0,
+				low_signal: 0,
+				context_only: 0,
+				unreadable: 0,
+			},
+			batches: [{ index: 0, processed: 2, summary: "first batch" }],
+			items: [],
+		};
+		expect(
+			updatePeriodDigestHistoryCoverage(claim.id, claim.claimToken, coverage),
+		).toBe(true);
+		failPeriodDigestHistory(
+			claim.id,
+			claim.claimToken,
+			new Error("DeepSeek request failed: 402 Insufficient Balance"),
+		);
+		expect(listPeriodDigestHistory()[0]).toMatchObject({
+			status: "failed",
+			counts: { home: 4, links: 2, feed: 1 },
+			coverage: { expected: 4, processed: 2, complete: false },
+			summary: "DeepSeek request failed: 402 Insufficient Balance",
+		});
+	});
+
 	it("claims one generator per day and restores a completed report", () => {
 		const first = claimPeriodDigestDate("2026-07-31");
 		expect(first.claimed).toBe(true);
