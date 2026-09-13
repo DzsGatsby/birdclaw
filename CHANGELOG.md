@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.11.16
+
+- Add the v23 production database migration for the daily coverage ledger introduced in v0.11.15.
+
 ## 0.11.15
 
 - Review every Home tweet in resumable, strictly validated batches before completing a Today report; visibly append any important item omitted from the main synthesis and report reviewed versus cited coverage.

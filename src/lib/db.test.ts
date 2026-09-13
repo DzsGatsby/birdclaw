@@ -77,7 +77,7 @@ afterEach(() => {
 });
 
 describe("database init", () => {
-	it("keeps the schema at v21 with X Remark, editorial feed, and profile Lists", () => {
+	it("keeps the schema at v23 with digest coverage and existing features", () => {
 		const tempDir = mkdtempSync(path.join(os.tmpdir(), "birdclaw-db-"));
 		tempDirs.push(tempDir);
 		process.env.BIRDCLAW_HOME = tempDir;
@@ -150,7 +150,13 @@ describe("database init", () => {
 				)
 				.all(),
 		).toEqual([{ name: "feed_items" }, { name: "feed_sync_state" }]);
-		expect(db.pragma("user_version", { simple: true })).toBe(22);
+		expect(db.pragma("user_version", { simple: true })).toBe(23);
+		expect(
+			db
+				.prepare("pragma table_info(period_digest_history)")
+				.all()
+				.map((column) => (column as { name: string }).name),
+		).toContain("coverage_json");
 	});
 
 	it.each([17, 18])(
@@ -237,7 +243,7 @@ describe("database init", () => {
 			expect(
 				db.prepare("select next_revision from xremark_outbound_state").get(),
 			).toEqual({ next_revision: 2 });
-			expect(db.pragma("user_version", { simple: true })).toBe(22);
+			expect(db.pragma("user_version", { simple: true })).toBe(23);
 		},
 	);
 
@@ -320,7 +326,7 @@ describe("database init", () => {
 		expect(
 			db.prepare("select * from xremark_outbound_state where id = 1").get(),
 		).toEqual({ id: 1, next_revision: 0, last_acked_revision: 0 });
-		expect(db.pragma("user_version", { simple: true })).toBe(22);
+		expect(db.pragma("user_version", { simple: true })).toBe(23);
 	});
 
 	it("seeds demo data after an initial unseeded open", () => {
@@ -676,7 +682,7 @@ describe("database init", () => {
 				.all()
 				.map((column) => (column as { name: string }).name),
 		).toContain("format_version");
-		expect(db.pragma("user_version", { simple: true })).toBe(22);
+		expect(db.pragma("user_version", { simple: true })).toBe(23);
 	});
 
 	it("normalizes legacy tweet timestamps during startup migration", () => {
@@ -705,7 +711,7 @@ describe("database init", () => {
 				.prepare("select created_at from tweets where id = ?")
 				.get("tweet_legacy_date"),
 		).toEqual({ created_at: "2026-06-23T06:06:01.000Z" });
-		expect(db.pragma("user_version", { simple: true })).toBe(22);
+		expect(db.pragma("user_version", { simple: true })).toBe(23);
 	});
 
 	it("migrates v12 profile notes without overriding imported descriptions", () => {
@@ -742,7 +748,30 @@ describe("database init", () => {
 				)
 				.get(),
 		).toEqual({ remark: "Legacy local remark", description: null });
-		expect(db.pragma("user_version", { simple: true })).toBe(22);
+		expect(db.pragma("user_version", { simple: true })).toBe(23);
+	});
+
+	it("migrates a v22 production database to daily coverage storage", () => {
+		const tempDir = mkdtempSync(path.join(os.tmpdir(), "birdclaw-db-v22-"));
+		tempDirs.push(tempDir);
+		process.env.BIRDCLAW_HOME = tempDir;
+		resetBirdclawPathsForTests();
+
+		const initial = getNativeDb({ seedDemoData: false });
+		initial.exec(`
+			alter table period_digest_history drop column coverage_json;
+			pragma user_version = 22;
+		`);
+		resetDatabaseForTests();
+
+		const migrated = getNativeDb({ seedDemoData: false });
+		expect(migrated.pragma("user_version", { simple: true })).toBe(23);
+		expect(
+			migrated
+				.prepare("pragma table_info(period_digest_history)")
+				.all()
+				.map((column) => (column as { name: string }).name),
+		).toContain("coverage_json");
 	});
 
 	it("does not request a write lock for completed startup backfills", async () => {

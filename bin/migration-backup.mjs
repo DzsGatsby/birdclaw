@@ -15,7 +15,7 @@ import { backup, DatabaseSync } from "node:sqlite";
 // This is the latest schema version that must have a verified pre-migration
 // backup before the server opens the writable database. Keep it aligned with
 // src/lib/db.ts even when the migration is unrelated to Twillot.
-export const REQUIRED_BACKUP_SCHEMA_VERSION = 22;
+export const REQUIRED_BACKUP_SCHEMA_VERSION = 23;
 const BACKUP_SPACE_MARGIN_BYTES = 32 * 1024 * 1024;
 
 export function resolveBirdclawRoot(

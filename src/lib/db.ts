@@ -1829,6 +1829,13 @@ const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
 		name: "add person archives, source jobs, documents and media",
 		up: ensurePersonArchiveTables,
 	},
+	{
+		version: 23,
+		name: "add daily digest coverage ledger",
+		up: (db) => {
+			ensurePeriodDigestHistoryTable(db);
+		},
+	},
 ];
 
 function ensureDemoData(db: Database) {
