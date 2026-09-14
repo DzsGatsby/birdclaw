@@ -70,6 +70,30 @@ describe("analysis runtime", () => {
 		});
 	});
 
+	it("accepts valid JSON when the model omits the hybrid delimiter", () => {
+		expect(
+			parseHybridAnalysis({
+				rawText: '{"title":"ok"}',
+				parse: (value) => value as { title: string },
+				fallback: () => ({ title: "fallback" }),
+			}),
+		).toEqual({
+			markdown: "",
+			value: { title: "ok" },
+		});
+
+		expect(
+			parseHybridAnalysis({
+				rawText: '```json\n{"title":"ok"}\n```',
+				parse: (value) => value as { title: string },
+				fallback: () => ({ title: "fallback" }),
+			}),
+		).toEqual({
+			markdown: "",
+			value: { title: "ok" },
+		});
+	});
+
 	it("handles non-stream response extraction centrally", async () => {
 		const runtime = createRuntimeServices({
 			env: (name) => (name === "OPENAI_API_KEY" ? "test" : undefined),

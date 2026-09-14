@@ -101,18 +101,27 @@ export function parseHybridAnalysis<T>({
 	delimiterPattern?: RegExp;
 }) {
 	const [markdownPart, jsonPart] = rawText.split(delimiterPattern);
-	const markdown = (markdownPart ?? rawText).trim();
-	const candidate = jsonPart?.slice(
-		jsonPart.indexOf("{"),
-		jsonPart.lastIndexOf("}") + 1,
-	);
+	const structuredPart = jsonPart ?? rawText;
+	const jsonStart = structuredPart.indexOf("{");
+	const jsonEnd = structuredPart.lastIndexOf("}");
+	const candidate =
+		jsonStart >= 0 && jsonEnd >= jsonStart
+			? structuredPart.slice(jsonStart, jsonEnd + 1)
+			: undefined;
 	if (candidate?.startsWith("{")) {
 		try {
+			const markdown = jsonPart
+				? (markdownPart ?? "").trim()
+				: rawText
+						.slice(0, rawText.indexOf("{"))
+						.replace(/```(?:json)?\s*$/i, "")
+						.trim();
 			return { markdown, value: parse(JSON.parse(candidate)) };
 		} catch {
-			return { markdown, value: fallback(markdown) };
+			// Fall through so malformed inline JSON is still preserved as markdown.
 		}
 	}
+	const markdown = (markdownPart ?? rawText).trim();
 	return { markdown, value: fallback(markdown) };
 }
 

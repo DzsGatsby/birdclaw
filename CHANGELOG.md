@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.11.20
+
+- Accept valid structured JSON even when the model omits the requested hybrid-output delimiter, avoiding unnecessary retries and recursive Today coverage splits.
+
 ## 0.11.19
 
 - Preserve an irreducible single tweet locally after repeated structured-output failures, ensuring one adversarial or malformed item cannot prevent complete daily coverage.
