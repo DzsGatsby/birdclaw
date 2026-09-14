@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.11.23
+
+- Stop recursively retrying malformed Today coverage at ten tweets or fewer; preserve the remaining source text in a validated local ledger so adversarial small batches cannot cause exponential model calls.
+
 ## 0.11.22
 
 - Compact complete Today coverage into bounded batch summaries plus prioritized details before final synthesis, and enable native Responses API context compaction as a second guard against oversized model context.

@@ -173,7 +173,7 @@ describe("period digest coverage", () => {
 		});
 	});
 
-	it("preserves an irreducible single tweet locally without inventing content", () => {
+	it("preserves a small batch locally without inventing content", () => {
 		const [readable] = createPeriodDigestCoverageBatches([
 			{ ...tweet("1", "Exact source text"), specialFollow: true },
 		]);
@@ -196,5 +196,16 @@ describe("period digest coverage", () => {
 			disposition: "unreadable",
 			note: "No readable source content was supplied.",
 		});
+
+		const [mixed] = createPeriodDigestCoverageBatches([
+			tweet("3", "First exact source"),
+			tweet("4", "Second exact source"),
+		]);
+		const mixedResult = createLocalPeriodDigestCoverageBatchResult(mixed!);
+		expect(mixedResult.items).toHaveLength(2);
+		expect(mixedResult.items.map((item) => item.note)).toEqual([
+			"First exact source",
+			"Second exact source",
+		]);
 	});
 });

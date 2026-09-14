@@ -1504,6 +1504,7 @@ interface PeriodDigestCoverageCheckpoint {
 
 const RELIABLE_COVERAGE_BATCH_ITEMS = 40;
 const RELIABLE_COVERAGE_BATCH_CHARS = 32_000;
+const LOCAL_COVERAGE_FALLBACK_MAX_ITEMS = 10;
 
 function splitPeriodDigestCoverageBatch(batch: PeriodDigestCoverageBatch) {
 	const midpoint = Math.ceil(batch.tweets.length / 2);
@@ -1602,11 +1603,11 @@ function reviewPeriodDigestCoverageBatchEffect({
 			if (!(error instanceof PeriodDigestCoverageOutputError)) {
 				return yield* Effect.fail(error);
 			}
-			if (batch.tweets.length <= 1) {
+			if (batch.tweets.length <= LOCAL_COVERAGE_FALLBACK_MAX_ITEMS) {
 				emitDigestStatus(
 					handlers,
-					"Coverage item preserved locally",
-					`Tweet ${batch.tweets[0]!.id} remains included after model validation failed.`,
+					"Coverage items preserved locally",
+					`${String(batch.tweets.length)} tweets remain included after repeated model validation failures.`,
 				);
 				return createLocalPeriodDigestCoverageBatchResult(batch);
 			}

@@ -898,7 +898,7 @@ describe("period digest", () => {
 		);
 	});
 
-	it("splits a malformed coverage batch and still verifies every tweet", async () => {
+	it("falls back locally for a small malformed batch and still verifies every tweet", async () => {
 		let coverageCalls = 0;
 		const coverageSizes: number[] = [];
 		const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
@@ -967,9 +967,9 @@ describe("period digest", () => {
 			result.context.tweets.length,
 			result.context.tweets.length,
 		]);
-		expect(coverageSizes.slice(2)).toEqual([
-			Math.ceil(result.context.tweets.length / 2),
-			Math.floor(result.context.tweets.length / 2),
+		expect(coverageSizes).toEqual([
+			result.context.tweets.length,
+			result.context.tweets.length,
 		]);
 		expect(result.coverage).toMatchObject({
 			expected: result.context.tweets.length,
