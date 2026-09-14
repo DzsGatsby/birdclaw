@@ -62,6 +62,15 @@ export type PeriodDigestSourceKind =
 	| "bookmarks"
 	| "dms";
 
+class PeriodDigestCoverageOutputError extends Error {
+	constructor(batchIndex: number) {
+		super(
+			`Coverage batch ${String(batchIndex + 1)} returned malformed or incomplete JSON`,
+		);
+		this.name = "PeriodDigestCoverageOutputError";
+	}
+}
+
 export interface PeriodDigestOptions {
 	period?: string;
 	since?: string;
@@ -1587,11 +1596,20 @@ function streamPeriodDigestCoverageEffect(
 					signal: options.signal,
 					parse: (value) => validatePeriodDigestCoverageBatch(batch, value),
 					fallback: () => {
-						throw new Error(
-							`Coverage batch ${String(batch.index + 1)} returned malformed or incomplete JSON`,
-						);
+						throw new PeriodDigestCoverageOutputError(batch.index);
 					},
 					bufferDeltasUntilSuccess: true,
+					retryFailedResult: {
+						maxAttempts: 3,
+						shouldRetry: (error) =>
+							error instanceof PeriodDigestCoverageOutputError,
+						onRetry: ({ attempt }) =>
+							emitDigestStatus(
+								handlers,
+								"Coverage output incomplete",
+								`Retrying batch ${String(batch.index + 1)} (${String(attempt)}/3).`,
+							),
+					},
 					onFailover: (target) =>
 						emitDigestStatus(
 							handlers,

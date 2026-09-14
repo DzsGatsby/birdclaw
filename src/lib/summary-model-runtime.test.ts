@@ -43,6 +43,13 @@ function openAIStream(answer: string) {
 	);
 }
 
+function malformedOpenAIStream() {
+	return new Response(
+		`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Malformed output" })}\n\ndata: [DONE]\n\n`,
+		{ headers: { "content-type": "text/event-stream" } },
+	);
+}
+
 describe("summary model runtime", () => {
 	it("keeps both provider failures when primary and backup are unavailable", async () => {
 		const fetch = vi
@@ -191,6 +198,86 @@ describe("summary model runtime", () => {
 		expect(result.value.answer).toBe("backup");
 		expect(deltas.join("")).toContain("Backup complete.");
 		expect(deltas.join("")).not.toContain("Primary complete.");
+	});
+
+	it("retries a buffered malformed result on the same provider", async () => {
+		class StructuredOutputError extends Error {}
+		const fetch = vi
+			.fn()
+			.mockResolvedValueOnce(malformedOpenAIStream())
+			.mockResolvedValueOnce(openAIStream("recovered"));
+		const runtime = createRuntimeServices({
+			fetch,
+			env: (name) =>
+				name === "OPENAI_API_KEY" ? "openai-test-key" : undefined,
+		});
+		const deltas: string[] = [];
+		const retries: number[] = [];
+		const result = await Effect.runPromise(
+			streamSummaryAnalysisEffect({
+				body: { input: [], stream: true },
+				options: {},
+				runtime,
+				parse: (value) => value as { answer: string; summary: string },
+				fallback: () => {
+					throw new StructuredOutputError("invalid structured output");
+				},
+				onDelta: (delta) => deltas.push(delta),
+				bufferDeltasUntilSuccess: true,
+				retryFailedResult: {
+					maxAttempts: 3,
+					shouldRetry: (error) => error instanceof StructuredOutputError,
+					onRetry: ({ attempt }) => retries.push(attempt),
+				},
+			}),
+		);
+
+		expect(fetch).toHaveBeenCalledTimes(2);
+		expect(retries).toEqual([2]);
+		expect(result.provider).toBe("openai");
+		expect(result.value.answer).toBe("recovered");
+		expect(deltas.join("")).toContain("Primary complete.");
+		expect(deltas.join("")).not.toContain("Malformed output");
+	});
+
+	it("fails over after structured-output retries are exhausted", async () => {
+		class StructuredOutputError extends Error {}
+		const fetch = vi
+			.fn()
+			.mockResolvedValueOnce(malformedOpenAIStream())
+			.mockResolvedValueOnce(malformedOpenAIStream())
+			.mockResolvedValueOnce(deepSeekStream());
+		const runtime = createRuntimeServices({
+			fetch,
+			env: (name) => {
+				if (name === "OPENAI_API_KEY") return "openai-test-key";
+				if (name === "DEEPSEEK_API_KEY") return "deepseek-test-key";
+				return undefined;
+			},
+		});
+		const failovers: string[] = [];
+		const result = await Effect.runPromise(
+			streamSummaryAnalysisEffect({
+				body: { input: [], stream: true },
+				options: {},
+				runtime,
+				parse: (value) => value as { answer: string; summary: string },
+				fallback: () => {
+					throw new StructuredOutputError("invalid structured output");
+				},
+				bufferDeltasUntilSuccess: true,
+				retryFailedResult: {
+					maxAttempts: 2,
+					shouldRetry: (error) => error instanceof StructuredOutputError,
+				},
+				onFailover: (target) => failovers.push(target.provider),
+			}),
+		);
+
+		expect(fetch).toHaveBeenCalledTimes(3);
+		expect(failovers).toEqual(["deepseek"]);
+		expect(result.provider).toBe("deepseek");
+		expect(result.value.answer).toBe("backup");
 	});
 
 	it("does not splice providers after interactive text was emitted", async () => {

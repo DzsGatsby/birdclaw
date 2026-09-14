@@ -154,11 +154,15 @@ export function readHybridAnalysisStreamEffect<T>(
 			delimiterPattern,
 			onDelta,
 		});
-		const parsed = parseHybridAnalysis({
-			rawText: stream.rawText,
-			parse,
-			fallback,
-			delimiterPattern,
+		const parsed = yield* Effect.try({
+			try: () =>
+				parseHybridAnalysis({
+					rawText: stream.rawText,
+					parse,
+					fallback,
+					delimiterPattern,
+				}),
+			catch: toError,
 		});
 		return {
 			...parsed,
@@ -229,11 +233,15 @@ export function requestHybridAnalysisEffect<T>({
 		if (!rawText) {
 			return yield* Effect.fail(new Error("OpenAI returned no output text"));
 		}
-		const parsed = parseHybridAnalysis({
-			rawText,
-			parse,
-			fallback,
-			delimiterPattern,
+		const parsed = yield* Effect.try({
+			try: () =>
+				parseHybridAnalysis({
+					rawText,
+					parse,
+					fallback,
+					delimiterPattern,
+				}),
+			catch: toError,
 		});
 		return { ...parsed, rawText };
 	});

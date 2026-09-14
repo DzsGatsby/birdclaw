@@ -319,11 +319,15 @@ function readDeepSeekStreamEffect<T>(
 					new Error("DeepSeek returned no output text"),
 				);
 			}
-			const parsed = parseHybridAnalysis({
-				rawText: state.rawText,
-				parse,
-				fallback,
-				delimiterPattern,
+			const parsed = yield* Effect.try({
+				try: () =>
+					parseHybridAnalysis({
+						rawText: state.rawText,
+						parse,
+						fallback,
+						delimiterPattern,
+					}),
+				catch: toError,
 			});
 			return {
 				...parsed,
@@ -353,6 +357,7 @@ export function streamSummaryAnalysisEffect<T>({
 	provider,
 	allowFailover = true,
 	bufferDeltasUntilSuccess = false,
+	retryFailedResult,
 	delimiterPattern = DEFAULT_DELIMITER_PATTERN,
 }: {
 	body: SummaryAnalysisBody;
@@ -370,6 +375,16 @@ export function streamSummaryAnalysisEffect<T>({
 	provider?: SummaryModelProvider;
 	allowFailover?: boolean;
 	bufferDeltasUntilSuccess?: boolean;
+	retryFailedResult?: {
+		maxAttempts: number;
+		shouldRetry: (error: Error) => boolean;
+		onRetry?: (retry: {
+			provider: SummaryModelProvider;
+			model: string;
+			attempt: number;
+			error: Error;
+		}) => void;
+	};
 	delimiterPattern?: RegExp;
 }): Effect.Effect<HybridAnalysisResult<T>, Error> {
 	return Effect.gen(function* () {
@@ -393,56 +408,83 @@ export function streamSummaryAnalysisEffect<T>({
 		for (const [index, target] of targets.entries()) {
 			if (index > 0) onFailover?.(target);
 			let emitted = false;
-			const bufferedDeltas: string[] = [];
-			const emit = (delta: string) => {
-				if (bufferDeltasUntilSuccess) {
-					bufferedDeltas.push(delta);
-					return;
-				}
-				emitted = true;
-				onDelta?.(delta);
-			};
-			const attempt = Effect.gen(function* () {
-				const response = yield* requestTargetEffect(
-					target,
-					body,
-					signal,
-					runtime,
-				);
-				const result =
-					target.provider === "deepseek"
-						? yield* readDeepSeekStreamEffect(response, {
-								parse,
-								fallback,
-								onDelta: emit,
-								delimiterPattern,
-							})
-						: yield* readHybridAnalysisStreamEffect(response, {
-								parse,
-								fallback,
-								onDelta: emit,
-								delimiterPattern,
-							});
-				if (validateResult) {
-					yield* Effect.try({
-						try: () => validateResult(result),
-						catch: toError,
-					});
-				}
-				return result;
-			});
-			const outcome = yield* Effect.either(attempt);
-			if (outcome._tag === "Right") {
-				if (bufferDeltasUntilSuccess) {
-					for (const delta of bufferedDeltas) onDelta?.(delta);
-				}
-				return {
-					...outcome.right,
-					provider: target.provider,
-					model: target.model,
+			let targetError: Error | undefined;
+			const maxAttempts = Math.max(
+				1,
+				Math.min(10, Math.floor(retryFailedResult?.maxAttempts ?? 1)),
+			);
+			for (
+				let attemptIndex = 0;
+				attemptIndex < maxAttempts;
+				attemptIndex += 1
+			) {
+				const bufferedDeltas: string[] = [];
+				const emit = (delta: string) => {
+					if (bufferDeltasUntilSuccess) {
+						bufferedDeltas.push(delta);
+						return;
+					}
+					emitted = true;
+					onDelta?.(delta);
 				};
+				const attempt = Effect.gen(function* () {
+					const response = yield* requestTargetEffect(
+						target,
+						body,
+						signal,
+						runtime,
+					);
+					const result =
+						target.provider === "deepseek"
+							? yield* readDeepSeekStreamEffect(response, {
+									parse,
+									fallback,
+									onDelta: emit,
+									delimiterPattern,
+								})
+							: yield* readHybridAnalysisStreamEffect(response, {
+									parse,
+									fallback,
+									onDelta: emit,
+									delimiterPattern,
+								});
+					if (validateResult) {
+						yield* Effect.try({
+							try: () => validateResult(result),
+							catch: toError,
+						});
+					}
+					return result;
+				});
+				const outcome = yield* Effect.either(attempt);
+				if (outcome._tag === "Right") {
+					if (bufferDeltasUntilSuccess) {
+						for (const delta of bufferedDeltas) onDelta?.(delta);
+					}
+					return {
+						...outcome.right,
+						provider: target.provider,
+						model: target.model,
+					};
+				}
+				targetError = toError(outcome.left);
+				const nextAttempt = attemptIndex + 2;
+				if (
+					!emitted &&
+					nextAttempt <= maxAttempts &&
+					retryFailedResult?.shouldRetry(targetError)
+				) {
+					retryFailedResult.onRetry?.({
+						provider: target.provider,
+						model: target.model,
+						attempt: nextAttempt,
+						error: targetError,
+					});
+					continue;
+				}
+				break;
 			}
-			lastError = toError(outcome.left);
+			lastError = targetError ?? new Error("Summary model attempt failed");
 			providerErrors.push({ provider: target.provider, error: lastError });
 			if (emitted || index === targets.length - 1) {
 				return yield* Effect.fail(combinedError() ?? lastError);

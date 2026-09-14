@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.11.17
+
+- Retry malformed or incomplete Today coverage batches on the same summary provider before failing over, while discarding invalid streamed output and preserving completed checkpoints.
+
 ## 0.11.16
 
 - Add the v23 production database migration for the daily coverage ledger introduced in v0.11.15.
