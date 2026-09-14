@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.11.27
+
+- Collapse Today's per-item coverage register by default while keeping its audit totals visible and preserving the full register in PDF exports.
+
 ## 0.11.26
 
 - Retry transient OpenAI response-stream failures once on the same provider during Today coverage, and keep mixed recoverable-primary plus terminal-backup failures on the short retry path instead of the six-hour provider cooldown.
