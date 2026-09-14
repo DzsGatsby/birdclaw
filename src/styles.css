@@ -256,6 +256,10 @@ summary::-webkit-details-marker {
 	display: none;
 }
 
+.today-print-only {
+	display: none;
+}
+
 html.theme-transition {
 	view-transition-name: theme;
 }
@@ -375,6 +379,10 @@ html.theme-transition::view-transition-new(theme) {
 	input,
 	.today-screen-only {
 		display: none !important;
+	}
+
+	.today-print-only {
+		display: block !important;
 	}
 
 	main {

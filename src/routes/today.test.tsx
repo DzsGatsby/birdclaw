@@ -327,6 +327,82 @@ describe("today route", () => {
 		).toBe(true);
 	});
 
+	it("collapses the coverage register on screen while preserving it for print", async () => {
+		const markdown = [
+			"# Today",
+			"",
+			"## 今日重点",
+			"",
+			"- 正文重点",
+			"",
+			"## 逐条覆盖补录",
+			"",
+			"以下重要条目已核验，但未被正文单独引用。",
+			"",
+			"- @alice 的补录内容 tweet_1",
+		].join("\n");
+		const result = digestResult("Today", markdown);
+		result.coverage = {
+			version: 1,
+			expected: 3,
+			processed: 3,
+			complete: true,
+			sourceTruncated: false,
+			missingTweetIds: [],
+			cited: 2,
+			dispositions: {
+				substantive: 2,
+				supporting: 0,
+				duplicate: 0,
+				low_signal: 1,
+				context_only: 0,
+				unreadable: 0,
+			},
+			batches: [],
+			items: [],
+		};
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: RequestInfo | URL) => {
+				const url = new URL(String(input), "http://localhost");
+				if (url.pathname === "/api/profile-hydrate") {
+					return Response.json({ ok: true, results: [] });
+				}
+				return ndjsonResponse([{ type: "done", result }]);
+			}),
+		);
+
+		render(<TodayRoute />);
+		generateSummary();
+
+		const coverageSummary = await screen.findByText(
+			"已审阅 3/3 条 · 重要内容 2 条 · 缺漏 0",
+		);
+		const details = coverageSummary.closest("details");
+		const screenDigest = details?.parentElement;
+		const printDigest = document.querySelector(".today-print-only");
+		expect(screenDigest).toHaveClass("today-screen-only");
+		expect(printDigest).not.toBeNull();
+		expect(details).not.toBeNull();
+		expect(details).not.toHaveAttribute("open");
+		expect(coverageSummary).toBeInTheDocument();
+		expect(
+			within(printDigest as HTMLElement).getByRole("heading", {
+				name: "逐条覆盖补录",
+				level: 2,
+			}),
+		).toBeInTheDocument();
+		expect(
+			within(printDigest as HTMLElement).getByRole("link", { name: "@alice" }),
+		).toBeInTheDocument();
+		expect(
+			within(printDigest as HTMLElement).getByRole("link", { name: "tweet_1" }),
+		).toBeInTheDocument();
+
+		fireEvent.click(within(details as HTMLElement).getByText("逐条覆盖补录"));
+		expect(details).toHaveAttribute("open");
+	});
+
 	it("runs a digest only after explicit generation for a valid custom range", async () => {
 		const digestUrls: URL[] = [];
 		vi.stubGlobal(
