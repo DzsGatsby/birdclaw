@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	assemblePeriodDigestCoverage,
 	buildPeriodDigestCoveragePrompt,
+	createLocalPeriodDigestCoverageBatchResult,
 	createPeriodDigestCoverageBatches,
 	type PeriodDigestCoverageBatch,
 	type PeriodDigestCoverageInputTweet,
@@ -169,6 +170,31 @@ describe("period digest coverage", () => {
 			processed: 3,
 			complete: true,
 			cited: 1,
+		});
+	});
+
+	it("preserves an irreducible single tweet locally without inventing content", () => {
+		const [readable] = createPeriodDigestCoverageBatches([
+			{ ...tweet("1", "Exact source text"), specialFollow: true },
+		]);
+		const readableResult = createLocalPeriodDigestCoverageBatchResult(
+			readable!,
+		);
+		expect(readableResult.items[0]).toMatchObject({
+			tweetId: "1",
+			disposition: "substantive",
+			importance: "high",
+			note: "Exact source text",
+		});
+
+		const [unreadable] = createPeriodDigestCoverageBatches([tweet("2", "")]);
+		const unreadableResult = createLocalPeriodDigestCoverageBatchResult(
+			unreadable!,
+		);
+		expect(unreadableResult.items[0]).toMatchObject({
+			tweetId: "2",
+			disposition: "unreadable",
+			note: "No readable source content was supplied.",
 		});
 	});
 });

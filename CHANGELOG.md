@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.11.19
+
+- Preserve an irreducible single tweet locally after repeated structured-output failures, ensuring one adversarial or malformed item cannot prevent complete daily coverage.
+
 ## 0.11.18
 
 - Pre-split large Today coverage batches and recursively halve any smaller batch that still returns incomplete structured output, so every tweet can be verified without depending on a paid backup provider.

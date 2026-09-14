@@ -279,6 +279,32 @@ export function validatePeriodDigestCoverageBatch(
 	};
 }
 
+export function createLocalPeriodDigestCoverageBatchResult(
+	batch: PeriodDigestCoverageBatch,
+) {
+	if (batch.tweets.length !== 1) {
+		throw new Error("Local coverage fallback requires exactly one tweet");
+	}
+	const tweet = batch.tweets[0]!;
+	const content = visibleTweetContent(tweet);
+	return validatePeriodDigestCoverageBatch(batch, {
+		batchSummary:
+			"Preserved one source item locally after repeated structured-output validation failures.",
+		items: [
+			{
+				tweetId: tweet.id,
+				disposition: content ? "substantive" : "unreadable",
+				importance: tweet.specialFollow ? "high" : "medium",
+				topic: content
+					? "Locally preserved source item"
+					: "Unreadable source item",
+				note:
+					content.slice(0, 320) || "No readable source content was supplied.",
+			},
+		],
+	});
+}
+
 export function assemblePeriodDigestCoverage({
 	tweets,
 	batchResults,

@@ -37,6 +37,7 @@ import {
 import {
 	assemblePeriodDigestCoverage,
 	buildPeriodDigestCoveragePrompt,
+	createLocalPeriodDigestCoverageBatchResult,
 	createPeriodDigestCoverageBatches,
 	type PeriodDigestCoverage,
 	type PeriodDigestCoverageBatch,
@@ -1596,11 +1597,16 @@ function reviewPeriodDigestCoverageBatchEffect({
 			);
 			if (outcome._tag === "Right") return outcome.right.value;
 			const error = toError(outcome.left);
-			if (
-				!(error instanceof PeriodDigestCoverageOutputError) ||
-				batch.tweets.length <= 1
-			) {
+			if (!(error instanceof PeriodDigestCoverageOutputError)) {
 				return yield* Effect.fail(error);
+			}
+			if (batch.tweets.length <= 1) {
+				emitDigestStatus(
+					handlers,
+					"Coverage item preserved locally",
+					`Tweet ${batch.tweets[0]!.id} remains included after model validation failed.`,
+				);
+				return createLocalPeriodDigestCoverageBatchResult(batch);
 			}
 		}
 
