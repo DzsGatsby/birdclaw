@@ -477,6 +477,21 @@ export function claimPeriodDigestDate(date: string, db = getNativeDb()) {
 	return claimPeriodDigestWindow(date, localWindowForDateKey(date), db);
 }
 
+export function preparePeriodDigestDateRetry(date: string, db = getNativeDb()) {
+	localWindowForDateKey(date);
+	const now = new Date().toISOString();
+	return (
+		db
+			.prepare(
+				`update period_digest_history
+				 set status = 'failed', claim_token = '',
+				     error = 'Retry requested', finished_at = ?, updated_at = ?
+				 where digest_date = ? and status = 'pending'`,
+			)
+			.run(now, now, date).changes > 0
+	);
+}
+
 export function claimIntradayDigestSlot(slotKey: string, db = getNativeDb()) {
 	return claimPeriodDigestWindow(
 		slotKey,

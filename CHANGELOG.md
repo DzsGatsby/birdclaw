@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.11.21
+
+- Make an explicit daily-digest retry release any stale in-progress claim before queueing, so a deployment or crashed worker can resume immediately from its persisted coverage checkpoint.
+
 ## 0.11.20
 
 - Accept valid structured JSON even when the model omits the requested hybrid-output delimiter, avoiding unnecessary retries and recursive Today coverage splits.

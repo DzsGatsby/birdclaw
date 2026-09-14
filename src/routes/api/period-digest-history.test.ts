@@ -147,6 +147,24 @@ describe("daily digest history API", () => {
 		expect(queuePeriodDigestDate).toHaveBeenCalledWith("2026-09-12");
 	});
 
+	it("releases a fresh pending claim before queueing an explicit retry", async () => {
+		const first = claimPeriodDigestDate("2026-09-12");
+		expect(first.claimed).toBe(true);
+
+		const response = await POST({
+			request: new Request("http://localhost/api/period-digest-history", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ action: "retry", date: "2026-09-12" }),
+			}),
+		});
+
+		expect(response.status).toBe(202);
+		expect(queuePeriodDigestDate).toHaveBeenCalledWith("2026-09-12");
+		const reclaimed = claimPeriodDigestDate("2026-09-12");
+		expect(reclaimed).toMatchObject({ claimed: true, status: "pending" });
+	});
+
 	it("rejects an impossible retry date", async () => {
 		const response = await POST({
 			request: new Request("http://localhost/api/period-digest-history", {

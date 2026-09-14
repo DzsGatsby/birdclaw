@@ -5,7 +5,7 @@ import { ensureDailyDigestPdf } from "#/lib/daily-digest-pdf";
 import {
 	getPeriodDigestHistory,
 	listPeriodDigestHistory,
-	localWindowForDateKey,
+	preparePeriodDigestDateRetry,
 } from "#/lib/period-digest-history";
 import { queuePeriodDigestDate } from "#/lib/period-digest-scheduler";
 import {
@@ -86,7 +86,7 @@ export const Route = createFileRoute("/api/period-digest-history")({
 					);
 				}
 				try {
-					localWindowForDateKey(parsed.data.date);
+					preparePeriodDigestDateRetry(parsed.data.date);
 					queuePeriodDigestDate(parsed.data.date);
 					return jsonResponse(
 						{ ok: true, date: parsed.data.date, status: "queued" },
