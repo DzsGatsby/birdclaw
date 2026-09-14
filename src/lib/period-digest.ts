@@ -291,6 +291,8 @@ const DEFAULT_LIVE_THREAD_LIMIT = 12;
 const DEFAULT_LIVE_THREAD_TIMEOUT_MS = 5_000;
 const DEFAULT_DIGEST_FRESHNESS_MS = 5 * 60_000;
 const MAX_PROMPT_DATA_CHARS = 1_200_000;
+const COMPACT_COVERAGE_PROMPT_DATA_CHARS = 160_000;
+const RESPONSES_COMPACTION_THRESHOLD_TOKENS = 200_000;
 const DELIMITER_PATTERN = /\n---\s*\n/;
 
 function toError(error: unknown) {
@@ -1755,19 +1757,7 @@ function buildPrompt(
 		? selectWeeklyPromptTweets(context)
 		: prioritizeSpecialFollowTweets(context.tweets);
 	const promptTweets = options?.coverage
-		? options.coverage.items.map((item) => ({
-				id: item.tweetId,
-				url: item.url,
-				author: item.author,
-				name: item.name,
-				createdAt: item.createdAt,
-				specialFollow: item.specialFollow,
-				disposition: item.disposition,
-				importance: item.importance,
-				topic: item.topic,
-				note: item.note,
-				...(item.duplicateOf ? { duplicateOf: item.duplicateOf } : {}),
-			}))
+		? []
 		: selectedTweets.map((tweet) => ({
 				id: tweet.id,
 				url: tweet.url,
@@ -1790,7 +1780,38 @@ function buildPrompt(
 				quotedTweet: tweet.quotedTweet,
 				retweetedTweet: tweet.retweetedTweet,
 			}));
-	let remainingArticleContentChars = weeklyDeepDive ? 240_000 : 500_000;
+	const coverageItemsForPrompt = options?.coverage
+		? requiredCoverageItems(options.coverage)
+				.map((item, sourceIndex) => ({ item, sourceIndex }))
+				.sort((left, right) => {
+					const priority = (value: typeof left.item) =>
+						(value.specialFollow ? 1_000 : 0) +
+						(value.importance === "high"
+							? 300
+							: value.importance === "medium"
+								? 200
+								: 100) +
+						(value.disposition === "substantive" ? 20 : 10);
+					return (
+						priority(right.item) - priority(left.item) ||
+						left.sourceIndex - right.sourceIndex
+					);
+				})
+				.map(({ item }) => ({
+					id: item.tweetId,
+					author: item.author,
+					disposition: item.disposition,
+					importance: item.importance,
+					specialFollow: item.specialFollow,
+					topic: item.topic,
+					note: item.note,
+				}))
+		: [];
+	let remainingArticleContentChars = options?.coverage
+		? 40_000
+		: weeklyDeepDive
+			? 240_000
+			: 500_000;
 	const promptFeedItems = [...(context.feedItems ?? [])]
 		.sort((left, right) => {
 			if (left.isImportant !== right.isImportant) {
@@ -1826,15 +1847,19 @@ function buildPrompt(
 			};
 		});
 	const fitDataset = () => {
-		const maxPromptDataChars = weeklyDeepDive
-			? MAX_WEEKLY_PROMPT_DATA_CHARS
-			: MAX_PROMPT_DATA_CHARS;
+		const maxPromptDataChars = options?.coverage
+			? COMPACT_COVERAGE_PROMPT_DATA_CHARS
+			: weeklyDeepDive
+				? MAX_WEEKLY_PROMPT_DATA_CHARS
+				: MAX_PROMPT_DATA_CHARS;
 		let tweetCount = promptTweets.length;
+		let coverageItemCount = coverageItemsForPrompt.length;
 		let dmCount = context.dms.length;
 		let linkCount = context.links.length;
 		let feedCount = promptFeedItems.length;
 		const datasetFor = (
 			tweets: number,
+			coverageItems: number,
 			dms: number,
 			links: number,
 			feed: number,
@@ -1842,9 +1867,19 @@ function buildPrompt(
 			tweets: promptTweets.slice(0, tweets),
 			...(options?.coverage
 				? {
-						coverageBatchSummaries: options.coverage.batches.map(
-							(batch) => batch.summary,
-						),
+						coverage: {
+							processed: options.coverage.processed,
+							expected: options.coverage.expected,
+							dispositions: options.coverage.dispositions,
+							detailedItemsIncluded: coverageItems,
+							detailedItemsAvailable: coverageItemsForPrompt.length,
+							batchSummaries: options.coverage.batches.map((batch) => ({
+								index: batch.index,
+								processed: batch.processed,
+								summary: batch.summary.slice(0, 480),
+							})),
+							detailedItems: coverageItemsForPrompt.slice(0, coverageItems),
+						},
 					}
 				: {}),
 			dms: context.dms.slice(0, dms),
@@ -1853,10 +1888,13 @@ function buildPrompt(
 		});
 		const lengthFor = (
 			tweets: number,
+			coverageItems: number,
 			dms: number,
 			links: number,
 			feed: number,
-		) => JSON.stringify(datasetFor(tweets, dms, links, feed)).length;
+		) =>
+			JSON.stringify(datasetFor(tweets, coverageItems, dms, links, feed))
+				.length;
 		const fitCount = (max: number, fits: (count: number) => boolean) => {
 			let low = 0;
 			let high = max;
@@ -1873,61 +1911,86 @@ function buildPrompt(
 			return best;
 		};
 		if (
-			lengthFor(tweetCount, dmCount, linkCount, feedCount) <= maxPromptDataChars
+			lengthFor(tweetCount, coverageItemCount, dmCount, linkCount, feedCount) <=
+			maxPromptDataChars
 		) {
 			return {
-				dataset: datasetFor(tweetCount, dmCount, linkCount, feedCount),
+				dataset: datasetFor(
+					tweetCount,
+					coverageItemCount,
+					dmCount,
+					linkCount,
+					feedCount,
+				),
 				tweetCount,
 				feedCount,
+				coverageItemCount,
 			};
 		}
 		dmCount = fitCount(
 			dmCount,
 			(count) =>
-				lengthFor(tweetCount, count, linkCount, feedCount) <=
+				lengthFor(tweetCount, coverageItemCount, count, linkCount, feedCount) <=
 				maxPromptDataChars,
 		);
 		if (
-			lengthFor(tweetCount, dmCount, linkCount, feedCount) > maxPromptDataChars
+			lengthFor(tweetCount, coverageItemCount, dmCount, linkCount, feedCount) >
+			maxPromptDataChars
 		) {
 			linkCount = fitCount(
 				linkCount,
 				(count) =>
-					lengthFor(tweetCount, dmCount, count, feedCount) <=
+					lengthFor(tweetCount, coverageItemCount, dmCount, count, feedCount) <=
 					maxPromptDataChars,
 			);
 		}
 		if (
-			lengthFor(tweetCount, dmCount, linkCount, feedCount) > maxPromptDataChars
-		) {
-			tweetCount = fitCount(
-				tweetCount,
-				(count) =>
-					lengthFor(count, dmCount, linkCount, feedCount) <= maxPromptDataChars,
-			);
-		}
-		if (
-			lengthFor(tweetCount, dmCount, linkCount, feedCount) > maxPromptDataChars
+			lengthFor(tweetCount, coverageItemCount, dmCount, linkCount, feedCount) >
+			maxPromptDataChars
 		) {
 			feedCount = fitCount(
 				feedCount,
 				(count) =>
-					lengthFor(tweetCount, dmCount, linkCount, count) <=
+					lengthFor(tweetCount, coverageItemCount, dmCount, linkCount, count) <=
+					maxPromptDataChars,
+			);
+		}
+		if (
+			lengthFor(tweetCount, coverageItemCount, dmCount, linkCount, feedCount) >
+			maxPromptDataChars
+		) {
+			tweetCount = fitCount(
+				tweetCount,
+				(count) =>
+					lengthFor(count, coverageItemCount, dmCount, linkCount, feedCount) <=
+					maxPromptDataChars,
+			);
+		}
+		if (
+			lengthFor(tweetCount, coverageItemCount, dmCount, linkCount, feedCount) >
+			maxPromptDataChars
+		) {
+			coverageItemCount = fitCount(
+				coverageItemCount,
+				(count) =>
+					lengthFor(tweetCount, count, dmCount, linkCount, feedCount) <=
 					maxPromptDataChars,
 			);
 		}
 		return {
-			dataset: datasetFor(tweetCount, dmCount, linkCount, feedCount),
+			dataset: datasetFor(
+				tweetCount,
+				coverageItemCount,
+				dmCount,
+				linkCount,
+				feedCount,
+			),
 			tweetCount,
 			feedCount,
+			coverageItemCount,
 		};
 	};
-	const { dataset, tweetCount, feedCount } = fitDataset();
-	if (options?.coverage && tweetCount !== options.coverage.expected) {
-		throw new Error(
-			"Complete coverage ledger exceeded the final prompt budget",
-		);
-	}
+	const { dataset, tweetCount, feedCount, coverageItemCount } = fitDataset();
 
 	const reportRequirements = weeklyDeepDive
 		? `- This is a weekly deep-dive, not a daily digest. When the dataset is substantial, target 7,000-10,000 Chinese characters for zh-CN, or 2,500-3,500 words for other languages, supported by roughly 50-100 unique tweet citations. Do not pad thin datasets or repeat points merely to hit a length target.
@@ -1951,9 +2014,9 @@ function buildPrompt(
 Since: ${context.window.since}
 Until: ${context.window.until}
 Sources: ${JSON.stringify(context.counts)}
-Prompt tweets: ${String(tweetCount)} of ${String(context.tweets.length)} selected context tweets
+Prompt tweets: ${String(tweetCount)} of ${String(context.tweets.length)} raw context tweets
 Prompt feed items: ${String(feedCount)} of ${String(context.feedItems?.length ?? 0)} selected editorial items
-${options?.coverage ? `Coverage ledger: ${String(options.coverage.processed)}/${String(options.coverage.expected)} tweets processed across ${String(options.coverage.batches.length)} verified batches. The tweets dataset below is the verified per-tweet ledger, not raw tweets.` : ""}
+${options?.coverage ? `Coverage ledger: ${String(options.coverage.processed)}/${String(options.coverage.expected)} tweets processed across ${String(options.coverage.batches.length)} verified batches. The dataset contains every batch summary plus ${String(coverageItemCount)}/${String(coverageItemsForPrompt.length)} priority detail rows selected under a bounded context budget. Remaining verified important rows are appended locally after synthesis if the report does not cite them.` : ""}
 
 Write a high-signal "what happened" report from the user's Home timeline and optional editorial feed dataset.
 
@@ -1972,7 +2035,7 @@ ${reportRequirements}
 - Prefer important flashes for timely factual developments. For publisher articles, contentSource=full_text means content contains the fetched article body; read and synthesize that body instead of relying only on the title or excerpt. contentTruncated=true means the body was bounded for prompt size, so do not imply unseen details. Article content may be intentionally absent for restricted, high-risk, or analysis-tagged items; in that case use only the title, publisher, timestamp, and canonical link without inferring missing details.
 - For links: emit normal Markdown links with no space between the label and URL, e.g. [title](https://example.com), then cite the sharing tweet ids in the same bullet.
 - Prefer synthesis over chronology. Group repeated chatter into one bullet.
-- When a coverage ledger is present, consider every ledger item before writing. The final report may compress duplicate and low-signal items, but it must not ignore substantive or supporting items. "Processed" means reviewed, while sourceTweetIds means actually cited; do not claim those are the same measure.
+- When a compact coverage ledger is present, synthesize across every batch summary and all supplied detailed items. The detailed rows prioritize special follows and high-signal material; a local coverage register will append any remaining substantive or supporting notes that the synthesis does not cite. "Processed" means reviewed, while sourceTweetIds means actually cited; do not claim those are the same measure.
 - Mention handles when useful, but do not make the report a list of handles.
 - Do not include a generic "Action items" section.
 - If there is no data, say that plainly in one short paragraph.
@@ -2078,6 +2141,16 @@ function createOpenAIRequestBody(
 		}),
 		stream: true,
 		maxOutputTokens: maxOutputTokensFromOptions(options),
+		...(coverage
+			? {
+					contextManagement: [
+						{
+							type: "compaction" as const,
+							compactThreshold: RESPONSES_COMPACTION_THRESHOLD_TOKENS,
+						},
+					],
+				}
+			: {}),
 	});
 }
 

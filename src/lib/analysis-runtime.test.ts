@@ -38,12 +38,14 @@ describe("analysis runtime", () => {
 				system: "system",
 				prompt: "prompt",
 				stream: true,
+				contextManagement: [{ type: "compaction", compactThreshold: 200_000 }],
 			}),
 		).toMatchObject({
 			model: "env-model",
 			reasoning: { effort: "high" },
 			service_tier: "priority",
 			stream: true,
+			context_management: [{ type: "compaction", compact_threshold: 200_000 }],
 		});
 	});
 

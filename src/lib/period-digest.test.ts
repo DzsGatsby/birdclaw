@@ -17,6 +17,7 @@ import {
 import { setProfileSpecialFollow } from "./profile-priority";
 import { getTweetsByIds } from "./queries";
 import { writeSyncCache } from "./sync-cache";
+import type { PeriodDigestCoverage } from "./period-digest-coverage";
 
 const tempRoots: string[] = [];
 
@@ -763,8 +764,8 @@ describe("period digest", () => {
 				prompt.slice(
 					prompt.lastIndexOf("\nDataset:\n") + "\nDataset:\n".length,
 				),
-			) as { tweets: Array<{ id: string }> };
-			const cited = ledger.tweets[0]?.id;
+			) as { coverage: { detailedItems: Array<{ id: string }> } };
+			const cited = ledger.coverage.detailedItems[0]?.id;
 			return streamResponse(
 				[
 					sseFrame({
@@ -813,6 +814,12 @@ describe("period digest", () => {
 			expect(result.digest.sourceTweetIds).toContain(tweet.id);
 		}
 		expect(fetchMock).toHaveBeenCalledTimes(2);
+		const finalBody = JSON.parse(
+			String(fetchMock.mock.calls.at(-1)?.[1]?.body),
+		) as Record<string, unknown>;
+		expect(finalBody.context_management).toEqual([
+			{ type: "compaction", compact_threshold: 200_000 },
+		]);
 		expect(
 			getNativeDb()
 				.prepare(
@@ -827,6 +834,68 @@ describe("period digest", () => {
 				"Invented citation (tweet_not_in_context)",
 			),
 		).toThrow(/unknown tweet ids/);
+	});
+
+	it("bounds a large verified coverage ledger before final synthesis", () => {
+		const context = collectPeriodDigestContext({
+			since: "2026-01-01T00:00:00.000Z",
+			until: "2027-01-01T00:00:00.000Z",
+			maxTweets: 20,
+		});
+		const items = Array.from({ length: 2_500 }, (_, index) => ({
+			tweetId: String(index + 1),
+			author: `author_${String(index)}`,
+			name: `Author ${String(index)}`,
+			url: `https://x.com/author_${String(index)}/status/${String(index + 1)}`,
+			createdAt: "2026-09-13T00:00:00.000Z",
+			specialFollow: index % 500 === 0,
+			disposition: "substantive" as const,
+			importance: index % 10 === 0 ? ("high" as const) : ("medium" as const),
+			topic: `Topic ${String(index)}`,
+			note: `Verified detail ${String(index)} ${"重要信息".repeat(30)}`,
+		}));
+		const coverage: PeriodDigestCoverage = {
+			version: 1,
+			expected: items.length,
+			processed: items.length,
+			complete: true,
+			sourceTruncated: false,
+			missingTweetIds: [],
+			cited: 0,
+			dispositions: {
+				substantive: items.length,
+				supporting: 0,
+				duplicate: 0,
+				low_signal: 0,
+				context_only: 0,
+				unreadable: 0,
+			},
+			batches: Array.from({ length: 63 }, (_, index) => ({
+				index,
+				processed: Math.min(40, items.length - index * 40),
+				summary: `Batch ${String(index)} ${"summary ".repeat(100)}`,
+			})),
+			items,
+		};
+
+		const prompt = __test__.buildPrompt(context, { coverage });
+		const dataset = JSON.parse(
+			prompt.slice(prompt.lastIndexOf("\nDataset:\n") + "\nDataset:\n".length),
+		) as {
+			coverage: {
+				detailedItemsIncluded: number;
+				detailedItemsAvailable: number;
+				batchSummaries: unknown[];
+			};
+		};
+
+		expect(prompt.length).toBeLessThan(180_000);
+		expect(dataset.coverage.batchSummaries).toHaveLength(63);
+		expect(dataset.coverage.detailedItemsAvailable).toBe(items.length);
+		expect(dataset.coverage.detailedItemsIncluded).toBeLessThan(items.length);
+		expect(prompt).toContain(
+			"Remaining verified important rows are appended locally",
+		);
 	});
 
 	it("splits a malformed coverage batch and still verifies every tweet", async () => {

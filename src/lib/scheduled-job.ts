@@ -40,6 +40,18 @@ function leaseStaleMs(requestedMs: number) {
 	return Math.min(Math.max(requestedMs, 2_000), 30_000);
 }
 
+const MIN_AUTOMATIC_LEGACY_LOCK_AGE_MS = 2 * 60 * 60_000;
+
+function automaticLegacyLockAgeMs(requestedMs: number) {
+	return Math.max(requestedMs, MIN_AUTOMATIC_LEGACY_LOCK_AGE_MS);
+}
+
+function legacyLockArchivePath(lockPath: string) {
+	return `${lockPath}.legacy-${new Date()
+		.toISOString()
+		.replaceAll(/[^0-9]/g, "")}-${randomUUID()}`;
+}
+
 export function startScheduledJobRun(started = Date.now()): ScheduledJobRun {
 	const startedAt = new Date(started).toISOString();
 	return {
@@ -74,9 +86,7 @@ export async function migrateLegacyScheduledJobLock(
 	if (existing.isDirectory()) return { status: "lease", migrated: false };
 	if (!confirmedDrained) return { status: "legacy", migrated: false };
 
-	const archivedPath = `${lockPath}.legacy-${new Date()
-		.toISOString()
-		.replaceAll(/[^0-9]/g, "")}-${randomUUID()}`;
+	const archivedPath = legacyLockArchivePath(lockPath);
 	await fs.rename(lockPath, archivedPath);
 	return { status: "legacy", migrated: true, archivedPath };
 }
@@ -94,9 +104,19 @@ export async function acquireScheduledJobLock(
 		if (hasErrorCode(error, "ENOENT")) return undefined;
 		throw error;
 	});
-	// Releases before v0.8.63 used a regular file at this path. Never unlink it
-	// here: its owner may still be running during a rolling upgrade.
-	if (existing && !existing.isDirectory()) return undefined;
+	// Releases before v0.8.63 used a regular file at this path. Preserve fresh
+	// files during rolling upgrades, but recover ancient files left on a
+	// persistent volume by archiving them before acquiring the current lease.
+	if (existing && !existing.isDirectory()) {
+		if (Date.now() - existing.mtimeMs < automaticLegacyLockAgeMs(staleMs)) {
+			return undefined;
+		}
+		try {
+			await fs.rename(lockPath, legacyLockArchivePath(lockPath));
+		} catch (error) {
+			if (!hasErrorCode(error, "ENOENT")) throw error;
+		}
+	}
 
 	const stale = leaseStaleMs(staleMs);
 	try {
@@ -130,4 +150,4 @@ export function acquireScheduledJobLockEffect(
 	);
 }
 
-export const __test__ = { leaseStaleMs };
+export const __test__ = { automaticLegacyLockAgeMs, leaseStaleMs };

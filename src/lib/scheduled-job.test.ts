@@ -3,6 +3,7 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
 	utimesSync,
@@ -104,6 +105,27 @@ describe("scheduled job runtime", () => {
 		expect(readFileSync(lockPath, "utf8")).toContain("another-host");
 	});
 
+	it("archives an ancient legacy regular-file lock before acquiring", async () => {
+		const lockDirectory = path.join(makeTempDir(), "locks");
+		const lockPath = path.join(lockDirectory, "job.lock");
+		mkdirSync(lockDirectory, { recursive: true });
+		writeFileSync(lockPath, "abandoned legacy lock\n", "utf8");
+		const old = new Date(Date.now() - 3 * 60 * 60_000);
+		utimesSync(lockPath, old, old);
+
+		const release = await acquireScheduledJobLock(lockPath, 2_000);
+
+		expect(release).toBeTypeOf("function");
+		const archived = readdirSync(lockDirectory).filter((name) =>
+			name.startsWith("job.lock.legacy-"),
+		);
+		expect(archived).toHaveLength(1);
+		expect(readFileSync(path.join(lockDirectory, archived[0]!), "utf8")).toBe(
+			"abandoned legacy lock\n",
+		);
+		await release?.();
+	});
+
 	it("migrates a legacy lock only after an operator confirms the service drained", async () => {
 		const lockPath = path.join(makeTempDir(), "locks", "job.lock");
 		mkdirSync(path.dirname(lockPath), { recursive: true });
@@ -130,5 +152,6 @@ describe("scheduled job runtime", () => {
 		expect(__test__.leaseStaleMs(1_000)).toBe(2_000);
 		expect(__test__.leaseStaleMs(10_000)).toBe(10_000);
 		expect(__test__.leaseStaleMs(2 * 60 * 60_000)).toBe(30_000);
+		expect(__test__.automaticLegacyLockAgeMs(2_000)).toBe(2 * 60 * 60_000);
 	});
 });

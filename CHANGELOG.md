@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.11.22
+
+- Compact complete Today coverage into bounded batch summaries plus prioritized details before final synthesis, and enable native Responses API context compaction as a second guard against oversized model context.
+- Recover abandoned pre-v0.8.63 scheduler lock files on persistent volumes after a conservative two-hour safety window, while archiving the legacy file for rollback.
+
 ## 0.11.21
 
 - Make an explicit daily-digest retry release any stale in-progress claim before queueing, so a deployment or crashed worker can resume immediately from its persisted coverage checkpoint.

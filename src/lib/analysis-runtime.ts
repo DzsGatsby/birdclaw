@@ -68,12 +68,17 @@ export function createAnalysisRequestBody({
 	prompt,
 	stream,
 	maxOutputTokens = 7000,
+	contextManagement,
 }: {
 	settings: AnalysisModelSettings;
 	system: string;
 	prompt: string;
 	stream: boolean;
 	maxOutputTokens?: number;
+	contextManagement?: Array<{
+		type: "compaction";
+		compactThreshold: number;
+	}>;
 }) {
 	return {
 		model: settings.model,
@@ -81,6 +86,14 @@ export function createAnalysisRequestBody({
 		service_tier: settings.serviceTier,
 		store: false,
 		...(stream ? { stream: true } : {}),
+		...(contextManagement?.length
+			? {
+					context_management: contextManagement.map((item) => ({
+						type: item.type,
+						compact_threshold: item.compactThreshold,
+					})),
+				}
+			: {}),
 		max_output_tokens: maxOutputTokens,
 		input: [
 			{ role: "system" as const, content: system },
