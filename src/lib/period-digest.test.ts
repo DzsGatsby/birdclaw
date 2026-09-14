@@ -981,6 +981,67 @@ describe("period digest", () => {
 		});
 	});
 
+	it("retries a transient OpenAI stream failure before provider failover", async () => {
+		let coverageCalls = 0;
+		const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
+			const body = JSON.parse(String(init?.body)) as {
+				input: Array<{ content: string }>;
+			};
+			const prompt = body.input.at(-1)?.content ?? "";
+			if (prompt.includes("This is coverage batch")) {
+				coverageCalls += 1;
+				if (coverageCalls === 1) {
+					return streamResponse(
+						sseFrame({
+							type: "response.error",
+							error: { message: "Upstream request failed" },
+						}),
+					);
+				}
+				const marker = "\nTweets:\n";
+				const tweets = JSON.parse(
+					prompt.slice(prompt.lastIndexOf(marker) + marker.length),
+				) as Array<{ id: string }>;
+				return streamResponse(
+					`${sseFrame({
+						type: "response.output_text.delta",
+						delta: `Recovered.\n\n---\n${JSON.stringify({
+							batchSummary: "Recovered after one transient stream failure.",
+							items: tweets.map((tweet) => ({
+								tweetId: tweet.id,
+								disposition: "substantive",
+								importance: "medium",
+								topic: "Recovered",
+								note: "Verified after retry.",
+							})),
+						})}`,
+					})}data: [DONE]\n\n`,
+				);
+			}
+			return streamResponse(
+				`${sseFrame({
+					type: "response.output_text.delta",
+					delta:
+						'# Complete\n\nRecovered.\n\n---\n{"title":"Complete","summary":"Recovered","keyTopics":[],"notableLinks":[],"people":[],"actionItems":[],"sourceTweetIds":[]}',
+				})}data: [DONE]\n\n`,
+			);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const result = await streamPeriodDigest({
+			since: "2026-01-01T00:00:00.000Z",
+			until: "2027-01-01T00:00:00.000Z",
+			refresh: true,
+			maxTweets: 20,
+			twitterScope: "home",
+			coverageMode: "complete",
+		});
+
+		expect(result.coverage?.complete).toBe(true);
+		expect(coverageCalls).toBe(2);
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
+
 	it("sends the expanded output budget for weekly deep-dives", async () => {
 		const streamed = [
 			sseFrame({

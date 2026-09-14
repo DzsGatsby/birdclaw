@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.11.26
+
+- Retry transient OpenAI response-stream failures once on the same provider during Today coverage, and keep mixed recoverable-primary plus terminal-backup failures on the short retry path instead of the six-hour provider cooldown.
+
 ## 0.11.25
 
 - Bound every pre-split Today coverage half-batch to two model attempts; after repeated malformed output, preserve all forty or fewer source items locally instead of recursively issuing more requests.

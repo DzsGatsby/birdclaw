@@ -41,6 +41,14 @@ describe("daily digest scheduler", () => {
 				new Error("DeepSeek request failed: 402 Insufficient Balance"),
 			),
 		).toBe(6 * 60 * 60_000);
+		expect(
+			__test__.retryDelayMs(
+				99,
+				new Error(
+					"Summary providers failed — openai: Upstream request failed; deepseek: DeepSeek request failed: 402 Insufficient Balance",
+				),
+			),
+		).toBe(5 * 60_000);
 	});
 
 	it("starts with yesterday only on a fresh archive", () => {

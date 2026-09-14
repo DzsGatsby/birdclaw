@@ -73,6 +73,15 @@ class PeriodDigestCoverageOutputError extends Error {
 	}
 }
 
+function shouldRetryPeriodDigestCoverageError(error: Error) {
+	return (
+		error instanceof PeriodDigestCoverageOutputError ||
+		/\b429\b|\b5\d\d\b|upstream request failed|stream (?:read )?error|network|fetch failed|timed? ?out|timeout/i.test(
+			error.message,
+		)
+	);
+}
+
 export interface PeriodDigestOptions {
 	period?: string;
 	since?: string;
@@ -1580,8 +1589,7 @@ function reviewPeriodDigestCoverageBatchEffect({
 					bufferDeltasUntilSuccess: true,
 					retryFailedResult: {
 						maxAttempts: 2,
-						shouldRetry: (error) =>
-							error instanceof PeriodDigestCoverageOutputError,
+						shouldRetry: shouldRetryPeriodDigestCoverageError,
 						failoverAfterExhaustion: false,
 						onRetry: ({ attempt }) =>
 							emitDigestStatus(
