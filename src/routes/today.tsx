@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+	ChevronDown,
 	FileText,
 	CheckCircle2,
 	FileDown,
@@ -194,6 +195,94 @@ function markdownReferencePlainText(value: string) {
 		.replaceAll(/\*\*([^*]+)\*\*/g, "$1")
 		.replaceAll(/\s+/g, " ")
 		.trim();
+}
+
+function splitCoverageRegisterMarkdown(markdown: string) {
+	const heading = /^##\s+(逐条覆盖补录|Coverage register)\s*$/im.exec(markdown);
+	if (!heading || heading.index === undefined) {
+		return { body: markdown, coverage: null, title: null };
+	}
+	return {
+		body: markdown.slice(0, heading.index).trimEnd(),
+		coverage: markdown.slice(heading.index + heading[0].length).trim(),
+		title: heading[1] ?? "逐条覆盖补录",
+	};
+}
+
+function TodayDigestMarkdown({
+	markdown,
+	context,
+	coverage,
+}: {
+	markdown: string;
+	context?: PeriodDigestContext | null;
+	coverage?: PeriodDigestRunResult["coverage"];
+}) {
+	const parts = splitCoverageRegisterMarkdown(markdown);
+	if (!parts.coverage || !parts.title) {
+		return (
+			<MarkdownViewer
+				className="today-digest-pdf"
+				context={context}
+				markdownLinkClassName={todayMarkdownLinkClass}
+				markdown={markdown}
+				sourceOnlyCitations
+			/>
+		);
+	}
+	const chinese = parts.title === "逐条覆盖补录";
+	const coverageSummary = coverage
+		? chinese
+			? `已审阅 ${String(coverage.processed)}/${String(coverage.expected)} 条 · 重要内容 ${String(coverage.cited)} 条 · 缺漏 ${String(coverage.missingTweetIds.length)}`
+			: `Reviewed ${String(coverage.processed)}/${String(coverage.expected)} · ${String(coverage.cited)} important · ${String(coverage.missingTweetIds.length)} missing`
+		: chinese
+			? "查看未在正文中单独引用的重要条目"
+			: "View important items not cited separately above";
+
+	return (
+		<>
+			<div className="today-screen-only">
+				{parts.body ? (
+					<MarkdownViewer
+						context={context}
+						markdownLinkClassName={todayMarkdownLinkClass}
+						markdown={parts.body}
+						sourceOnlyCitations
+					/>
+				) : null}
+				<details className="group border-t border-[var(--line)] px-4 py-3">
+					<summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-left">
+						<span className="flex min-w-0 flex-col gap-0.5">
+							<span className="text-[15px] font-semibold text-[var(--ink)]">
+								{parts.title}
+							</span>
+							<span className="text-[12px] text-[var(--ink-soft)]">
+								{coverageSummary}
+							</span>
+						</span>
+						<ChevronDown
+							aria-hidden="true"
+							className="size-4 shrink-0 text-[var(--ink-soft)] transition-transform group-open:rotate-180"
+						/>
+					</summary>
+					<MarkdownViewer
+						className="mt-3 border-t border-[var(--line)] !px-0 !pb-0 !pt-3 text-[14px]"
+						context={context}
+						markdownLinkClassName={todayMarkdownLinkClass}
+						markdown={parts.coverage}
+						sourceOnlyCitations
+					/>
+				</details>
+			</div>
+			<MarkdownViewer
+				className="today-digest-pdf today-print-only"
+				context={context}
+				markdownLinkClassName={todayMarkdownLinkClass}
+				markdown={markdown}
+				sourceOnlyCitations
+			/>
+		</>
+	);
 }
 
 function markdownReferenceSectionHeading(line: string) {
@@ -1776,12 +1865,10 @@ export function TodayRouteView({
 				) : null}
 
 				{markdown ? (
-					<MarkdownViewer
-						className="today-digest-pdf"
+					<TodayDigestMarkdown
 						context={result?.context ?? context}
-						markdownLinkClassName={todayMarkdownLinkClass}
+						coverage={result?.coverage}
 						markdown={displayMarkdown}
-						sourceOnlyCitations
 					/>
 				) : (
 					<div className="px-4 py-5 text-[14px] text-[var(--ink-soft)]">
