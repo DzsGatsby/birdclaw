@@ -116,6 +116,7 @@ describe("period digest", () => {
 		expect(first.tweets.length).toBeGreaterThan(0);
 		expect(first.tweets.some((tweet) => tweet.media.length > 0)).toBe(true);
 		expect(first.counts.home).toBeGreaterThan(0);
+		const firstCoverageSourceHash = __test__.coverageSourceHash(first);
 		const profile = first.tweets[0]?.authorProfile;
 		expect(profile).toBeDefined();
 		getNativeDb()
@@ -131,6 +132,7 @@ describe("period digest", () => {
 			maxTweets: 20,
 		});
 		expect(changed.hash).not.toBe(first.hash);
+		expect(__test__.coverageSourceHash(changed)).toBe(firstCoverageSourceHash);
 	});
 
 	it("keeps fitting tweets in the prompt dataset", () => {

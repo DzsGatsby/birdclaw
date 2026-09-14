@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.11.24
+
+- Key resumable Today coverage checkpoints by the date window and actual visible tweet inputs, so unrelated live profile or editorial metadata changes cannot discard verified progress after a restart.
+
 ## 0.11.23
 
 - Stop recursively retrying malformed Today coverage at ten tweets or fewer; preserve the remaining source text in a validated local ledger so adversarial small batches cannot cause exponential model calls.

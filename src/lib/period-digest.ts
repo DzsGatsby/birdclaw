@@ -1497,8 +1497,8 @@ function coverageInputTweet(
 }
 
 interface PeriodDigestCoverageCheckpoint {
-	version: 1;
-	contextHash: string;
+	version: 2;
+	sourceHash: string;
 	batchResults: PeriodDigestCoverageBatchResult[];
 }
 
@@ -1638,13 +1638,26 @@ function coverageCheckpointKey(
 	context: PeriodDigestContext,
 	options: PeriodDigestOptions,
 ) {
+	const sourceHash = coverageSourceHash(context);
 	return [
-		"period-digest-coverage:v1",
+		"period-digest-coverage:v2",
 		providerFromOptions(options),
 		modelFromOptions(options),
 		reasoningEffortFromOptions(options),
-		context.hash,
+		sourceHash,
 	].join(":");
+}
+
+function coverageSourceHash(context: PeriodDigestContext) {
+	return createHash("sha1")
+		.update(
+			JSON.stringify({
+				window: [context.window.since, context.window.until],
+				sourceTruncated: context.sourceTruncated,
+				tweets: context.tweets.map(coverageInputTweet),
+			}),
+		)
+		.digest("hex");
 }
 
 function streamPeriodDigestCoverageEffect(
@@ -1654,16 +1667,14 @@ function streamPeriodDigestCoverageEffect(
 ): Effect.Effect<PeriodDigestCoverage, Error> {
 	return Effect.gen(function* () {
 		const tweets = context.tweets.map(coverageInputTweet);
+		const sourceHash = coverageSourceHash(context);
 		const batches = createPeriodDigestCoverageBatches(tweets);
 		const checkpointKey = coverageCheckpointKey(context, options);
 		const cached = yield* tryDigestSync(() =>
 			readSyncCache<PeriodDigestCoverageCheckpoint>(checkpointKey),
 		);
 		const completedByIndex = new Map<number, PeriodDigestCoverageBatchResult>();
-		if (
-			cached?.value.version === 1 &&
-			cached.value.contextHash === context.hash
-		) {
+		if (cached?.value.version === 2 && cached.value.sourceHash === sourceHash) {
 			for (const candidate of cached.value.batchResults) {
 				const batch = batches[candidate.index];
 				if (!batch) continue;
@@ -1724,8 +1735,8 @@ function streamPeriodDigestCoverageEffect(
 				completedByIndex.set(batch.index, batchResult);
 				yield* tryDigestSync(() =>
 					writeSyncCache(checkpointKey, {
-						version: 1,
-						contextHash: context.hash,
+						version: 2,
+						sourceHash,
 						batchResults: [...completedByIndex.values()],
 					} satisfies PeriodDigestCoverageCheckpoint),
 				);
@@ -2589,6 +2600,7 @@ export const __test__ = {
 	parsePeriodDigestValue,
 	coverageMarkdownTweetIds,
 	appendCoverageRegister,
+	coverageSourceHash,
 	resolveRefreshScope,
 	processSseChunk,
 	resolvePeriodDigestWindow,
