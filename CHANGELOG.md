@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.11.25
+
+- Bound every pre-split Today coverage half-batch to two model attempts; after repeated malformed output, preserve all forty or fewer source items locally instead of recursively issuing more requests.
+
 ## 0.11.24
 
 - Key resumable Today coverage checkpoints by the date window and actual visible tweet inputs, so unrelated live profile or editorial metadata changes cannot discard verified progress after a restart.

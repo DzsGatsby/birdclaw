@@ -1504,7 +1504,7 @@ interface PeriodDigestCoverageCheckpoint {
 
 const RELIABLE_COVERAGE_BATCH_ITEMS = 40;
 const RELIABLE_COVERAGE_BATCH_CHARS = 32_000;
-const LOCAL_COVERAGE_FALLBACK_MAX_ITEMS = 10;
+const LOCAL_COVERAGE_FALLBACK_MAX_ITEMS = RELIABLE_COVERAGE_BATCH_ITEMS;
 
 function splitPeriodDigestCoverageBatch(batch: PeriodDigestCoverageBatch) {
 	const midpoint = Math.ceil(batch.tweets.length / 2);
