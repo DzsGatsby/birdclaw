@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.11.18
+
+- Pre-split large Today coverage batches and recursively halve any smaller batch that still returns incomplete structured output, so every tweet can be verified without depending on a paid backup provider.
+
 ## 0.11.17
 
 - Retry malformed or incomplete Today coverage batches on the same summary provider before failing over, while discarding invalid streamed output and preserving completed checkpoints.

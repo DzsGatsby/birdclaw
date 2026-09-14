@@ -378,6 +378,7 @@ export function streamSummaryAnalysisEffect<T>({
 	retryFailedResult?: {
 		maxAttempts: number;
 		shouldRetry: (error: Error) => boolean;
+		failoverAfterExhaustion?: boolean;
 		onRetry?: (retry: {
 			provider: SummaryModelProvider;
 			model: string;
@@ -486,7 +487,16 @@ export function streamSummaryAnalysisEffect<T>({
 			}
 			lastError = targetError ?? new Error("Summary model attempt failed");
 			providerErrors.push({ provider: target.provider, error: lastError });
-			if (emitted || index === targets.length - 1) {
+			const retryExhaustedWithoutFailover = Boolean(
+				retryFailedResult &&
+				retryFailedResult.failoverAfterExhaustion === false &&
+				retryFailedResult.shouldRetry(lastError),
+			);
+			if (
+				emitted ||
+				retryExhaustedWithoutFailover ||
+				index === targets.length - 1
+			) {
 				return yield* Effect.fail(combinedError() ?? lastError);
 			}
 		}

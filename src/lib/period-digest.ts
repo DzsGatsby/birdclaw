@@ -39,6 +39,7 @@ import {
 	buildPeriodDigestCoveragePrompt,
 	createPeriodDigestCoverageBatches,
 	type PeriodDigestCoverage,
+	type PeriodDigestCoverageBatch,
 	type PeriodDigestCoverageBatchResult,
 	type PeriodDigestCoverageEmbeddedTweet,
 	type PeriodDigestCoverageInputTweet,
@@ -1498,6 +1499,132 @@ interface PeriodDigestCoverageCheckpoint {
 	batchResults: PeriodDigestCoverageBatchResult[];
 }
 
+const RELIABLE_COVERAGE_BATCH_ITEMS = 40;
+const RELIABLE_COVERAGE_BATCH_CHARS = 32_000;
+
+function splitPeriodDigestCoverageBatch(batch: PeriodDigestCoverageBatch) {
+	const midpoint = Math.ceil(batch.tweets.length / 2);
+	return [batch.tweets.slice(0, midpoint), batch.tweets.slice(midpoint)].map(
+		(tweets) => ({
+			index: batch.index,
+			tweets,
+			serializedChars: JSON.stringify(tweets).length,
+		}),
+	);
+}
+
+function mergePeriodDigestCoverageBatchResults(
+	batch: PeriodDigestCoverageBatch,
+	results: PeriodDigestCoverageBatchResult[],
+) {
+	return validatePeriodDigestCoverageBatch(batch, {
+		batchSummary: results
+			.map((result) => result.batchSummary)
+			.join(" ")
+			.trim()
+			.slice(0, 1_200),
+		items: results.flatMap((result) =>
+			result.items.map((item) => ({
+				tweetId: item.tweetId,
+				disposition: item.disposition,
+				importance: item.importance,
+				topic: item.topic,
+				note: item.note,
+				...(item.duplicateOf ? { duplicateOf: item.duplicateOf } : {}),
+			})),
+		),
+	});
+}
+
+function reviewPeriodDigestCoverageBatchEffect({
+	batch,
+	totalBatches,
+	options,
+	handlers,
+}: {
+	batch: PeriodDigestCoverageBatch;
+	totalBatches: number;
+	options: PeriodDigestOptions;
+	handlers: PeriodDigestStreamHandlers;
+}): Effect.Effect<PeriodDigestCoverageBatchResult, Error> {
+	return Effect.gen(function* () {
+		const shouldPreSplit =
+			batch.tweets.length > 1 &&
+			(batch.tweets.length > RELIABLE_COVERAGE_BATCH_ITEMS ||
+				batch.serializedChars > RELIABLE_COVERAGE_BATCH_CHARS);
+		if (!shouldPreSplit) {
+			const outcome = yield* Effect.either(
+				streamSummaryAnalysisEffect({
+					body: createAnalysisRequestBody({
+						settings: resolveSummaryModelSettings(options),
+						system:
+							"You are a meticulous private-timeline coverage analyst. Account for every supplied top-level tweet exactly once and return strict structured output after the delimiter.",
+						prompt: buildPeriodDigestCoveragePrompt({
+							batch,
+							totalBatches,
+							language: languageFromOptions(options),
+						}),
+						stream: true,
+						maxOutputTokens: 12_000,
+					}),
+					options,
+					signal: options.signal,
+					parse: (value) => validatePeriodDigestCoverageBatch(batch, value),
+					fallback: () => {
+						throw new PeriodDigestCoverageOutputError(batch.index);
+					},
+					bufferDeltasUntilSuccess: true,
+					retryFailedResult: {
+						maxAttempts: 2,
+						shouldRetry: (error) =>
+							error instanceof PeriodDigestCoverageOutputError,
+						failoverAfterExhaustion: false,
+						onRetry: ({ attempt }) =>
+							emitDigestStatus(
+								handlers,
+								"Coverage output incomplete",
+								`Retrying batch ${String(batch.index + 1)} (${String(attempt)}/2).`,
+							),
+					},
+					onFailover: (target) =>
+						emitDigestStatus(
+							handlers,
+							"Coverage model unavailable",
+							`Switching batch ${String(batch.index + 1)} to ${target.provider === "deepseek" ? "DeepSeek V4 / Flash" : "ChatGPT"}.`,
+						),
+				}),
+			);
+			if (outcome._tag === "Right") return outcome.right.value;
+			const error = toError(outcome.left);
+			if (
+				!(error instanceof PeriodDigestCoverageOutputError) ||
+				batch.tweets.length <= 1
+			) {
+				return yield* Effect.fail(error);
+			}
+		}
+
+		const children = splitPeriodDigestCoverageBatch(batch);
+		emitDigestStatus(
+			handlers,
+			"Coverage batch split automatically",
+			`Batch ${String(batch.index + 1)} is now ${String(children[0]!.tweets.length)} + ${String(children[1]!.tweets.length)} tweets.`,
+		);
+		const results: PeriodDigestCoverageBatchResult[] = [];
+		for (const child of children) {
+			results.push(
+				yield* reviewPeriodDigestCoverageBatchEffect({
+					batch: child,
+					totalBatches,
+					options,
+					handlers,
+				}),
+			);
+		}
+		return mergePeriodDigestCoverageBatchResults(batch, results);
+	});
+}
+
 function coverageCheckpointKey(
 	context: PeriodDigestContext,
 	options: PeriodDigestOptions,
@@ -1579,45 +1706,13 @@ function streamPeriodDigestCoverageEffect(
 					`Reviewing every tweet · batch ${String(batch.index + 1)}/${String(batches.length)}`,
 					`${String(progress().processed)}/${String(tweets.length)} tweets verified`,
 				);
-				const stream = yield* streamSummaryAnalysisEffect({
-					body: createAnalysisRequestBody({
-						settings: resolveSummaryModelSettings(options),
-						system:
-							"You are a meticulous private-timeline coverage analyst. Account for every supplied top-level tweet exactly once and return strict structured output after the delimiter.",
-						prompt: buildPeriodDigestCoveragePrompt({
-							batch,
-							totalBatches: batches.length,
-							language: languageFromOptions(options),
-						}),
-						stream: true,
-						maxOutputTokens: 12_000,
-					}),
+				const batchResult = yield* reviewPeriodDigestCoverageBatchEffect({
+					batch,
+					totalBatches: batches.length,
 					options,
-					signal: options.signal,
-					parse: (value) => validatePeriodDigestCoverageBatch(batch, value),
-					fallback: () => {
-						throw new PeriodDigestCoverageOutputError(batch.index);
-					},
-					bufferDeltasUntilSuccess: true,
-					retryFailedResult: {
-						maxAttempts: 3,
-						shouldRetry: (error) =>
-							error instanceof PeriodDigestCoverageOutputError,
-						onRetry: ({ attempt }) =>
-							emitDigestStatus(
-								handlers,
-								"Coverage output incomplete",
-								`Retrying batch ${String(batch.index + 1)} (${String(attempt)}/3).`,
-							),
-					},
-					onFailover: (target) =>
-						emitDigestStatus(
-							handlers,
-							"Coverage model unavailable",
-							`Switching batch ${String(batch.index + 1)} to ${target.provider === "deepseek" ? "DeepSeek V4 / Flash" : "ChatGPT"}.`,
-						),
+					handlers,
 				});
-				completedByIndex.set(batch.index, stream.value);
+				completedByIndex.set(batch.index, batchResult);
 				yield* tryDigestSync(() =>
 					writeSyncCache(checkpointKey, {
 						version: 1,

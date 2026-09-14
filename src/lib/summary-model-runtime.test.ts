@@ -280,6 +280,43 @@ describe("summary model runtime", () => {
 		expect(result.value.answer).toBe("backup");
 	});
 
+	it("can return an exhausted structured-output error before provider failover", async () => {
+		class StructuredOutputError extends Error {}
+		const fetch = vi
+			.fn()
+			.mockResolvedValueOnce(malformedOpenAIStream())
+			.mockResolvedValueOnce(deepSeekStream());
+		const runtime = createRuntimeServices({
+			fetch,
+			env: (name) => {
+				if (name === "OPENAI_API_KEY") return "openai-test-key";
+				if (name === "DEEPSEEK_API_KEY") return "deepseek-test-key";
+				return undefined;
+			},
+		});
+
+		await expect(
+			Effect.runPromise(
+				streamSummaryAnalysisEffect({
+					body: { input: [], stream: true },
+					options: {},
+					runtime,
+					parse: (value) => value,
+					fallback: () => {
+						throw new StructuredOutputError("split this batch");
+					},
+					bufferDeltasUntilSuccess: true,
+					retryFailedResult: {
+						maxAttempts: 1,
+						shouldRetry: (error) => error instanceof StructuredOutputError,
+						failoverAfterExhaustion: false,
+					},
+				}),
+			),
+		).rejects.toThrow("split this batch");
+		expect(fetch).toHaveBeenCalledTimes(1);
+	});
+
 	it("does not splice providers after interactive text was emitted", async () => {
 		const fetch = vi
 			.fn()

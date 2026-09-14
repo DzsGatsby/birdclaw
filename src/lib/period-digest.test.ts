@@ -829,6 +829,87 @@ describe("period digest", () => {
 		).toThrow(/unknown tweet ids/);
 	});
 
+	it("splits a malformed coverage batch and still verifies every tweet", async () => {
+		let coverageCalls = 0;
+		const coverageSizes: number[] = [];
+		const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
+			const body = JSON.parse(String(init?.body)) as {
+				input: Array<{ content: string }>;
+			};
+			const prompt = body.input.at(-1)?.content ?? "";
+			if (prompt.includes("This is coverage batch")) {
+				const marker = "\nTweets:\n";
+				const tweets = JSON.parse(
+					prompt.slice(prompt.lastIndexOf(marker) + marker.length),
+				) as Array<{ id: string }>;
+				coverageCalls += 1;
+				coverageSizes.push(tweets.length);
+				if (coverageCalls <= 2) {
+					return streamResponse(
+						sseFrame({
+							type: "response.output_text.delta",
+							delta: "Incomplete coverage output",
+						}),
+					);
+				}
+				return streamResponse(
+					[
+						sseFrame({
+							type: "response.output_text.delta",
+							delta: `Batch verified.\n\n---\n${JSON.stringify({
+								batchSummary: "Verified a split batch.",
+								items: tweets.map((tweet) => ({
+									tweetId: tweet.id,
+									disposition: "substantive",
+									importance: "medium",
+									topic: "Updates",
+									note: "A distinct update.",
+								})),
+							})}`,
+						}),
+						"data: [DONE]\n\n",
+					].join(""),
+				);
+			}
+			return streamResponse(
+				[
+					sseFrame({
+						type: "response.output_text.delta",
+						delta:
+							'# Complete\n\nCovered all inputs.\n\n---\n{"title":"Complete","summary":"Covered all inputs.","keyTopics":[],"notableLinks":[],"people":[],"actionItems":[],"sourceTweetIds":[]}',
+					}),
+					"data: [DONE]\n\n",
+				].join(""),
+			);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const result = await streamPeriodDigest({
+			since: "2026-01-01T00:00:00.000Z",
+			until: "2027-01-01T00:00:00.000Z",
+			refresh: true,
+			maxTweets: 20,
+			twitterScope: "home",
+			coverageMode: "complete",
+		});
+
+		expect(result.context.tweets.length).toBeGreaterThan(1);
+		expect(coverageSizes.slice(0, 2)).toEqual([
+			result.context.tweets.length,
+			result.context.tweets.length,
+		]);
+		expect(coverageSizes.slice(2)).toEqual([
+			Math.ceil(result.context.tweets.length / 2),
+			Math.floor(result.context.tweets.length / 2),
+		]);
+		expect(result.coverage).toMatchObject({
+			expected: result.context.tweets.length,
+			processed: result.context.tweets.length,
+			complete: true,
+			missingTweetIds: [],
+		});
+	});
+
 	it("sends the expanded output budget for weekly deep-dives", async () => {
 		const streamed = [
 			sseFrame({
